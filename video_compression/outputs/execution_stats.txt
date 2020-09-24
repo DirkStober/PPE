@@ -1,0 +1,30 @@
+********* Frame: 0 (I) *********
+Convert to YCbCr:             83ms
+Low pass filter:              353ms
+Downsample:                   55ms
+Convert to frequency domain:  93ms
+Quantize:                     165ms
+Compute DC differences:       2ms
+Zig-zag order:                19ms
+Encode coefficients:          154ms
+
+********* Frame: 1 (I) *********
+Convert to YCbCr:             63ms
+Low pass filter:              372ms
+Downsample:                   56ms
+Convert to frequency domain:  92ms
+Quantize:                     170ms
+Compute DC differences:       2ms
+Zig-zag order:                19ms
+Encode coefficients:          157ms
+
+********* Frame: 2 (I) *********
+Convert to YCbCr:             64ms
+Low pass filter:              376ms
+Downsample:                   68ms
+Convert to frequency domain:  93ms
+Quantize:                     170ms
+Compute DC differences:       2ms
+Zig-zag order:                20ms
+Encode coefficients:          153ms
+

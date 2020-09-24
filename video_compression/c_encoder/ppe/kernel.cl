@@ -1,6 +1,7 @@
+#include "test_setup.h"
 
-
-
+/* Basic Kernel*/
+/*
 kernel void convertRGBtoYCbCr(global float *in_rc, global float *in_gc, global float*in_bc,global float * out_y, global float * out_cb, global float *out_cr) {
 	int thread_id = get_global_id(0);
 
@@ -14,25 +15,60 @@ kernel void convertRGBtoYCbCr(global float *in_rc, global float *in_gc, global f
 	out_cb[thread_id] = Cb;
 	out_cr[thread_id] = Cr;
 }
+*/
+/*Using local memory*/
 
+kernel void convertRGBtoYCbCr
+(
+	global float *in_rc, global float *in_gc, global float*in_bc, global float * out_y, 
+	global float * out_cb, global float *out_cr, __local float * sharedMem , int shared_size
+) 
+{
+	int tid = get_global_id(0);
+	
 
+	int bid = get_local_id(0);
+
+	for (int thread_id = tid; thread_id < SIZE_FRAME; thread_id += get_global_size(0)) {
+		float Y, Cb, Cr;
+		sharedMem[bid] = in_rc[thread_id];
+		sharedMem[bid + shared_size] = in_gc[thread_id];
+		sharedMem[bid + shared_size * 2] = in_bc[thread_id];
+
+		Y = 0 + ((float)0.299*sharedMem[bid]) + ((float)0.587*sharedMem[bid + shared_size]) + ((float)0.113*sharedMem[bid + shared_size * 2]);
+		Cb = 128 - ((float)0.168736*sharedMem[bid]) - ((float)0.331264*sharedMem[bid + shared_size]) + ((float)0.5*sharedMem[bid + shared_size * 2]);
+		Cr = 128 + ((float)0.5*sharedMem[bid]) - ((float)0.418688*sharedMem[bid + shared_size]) - ((float)0.081312*sharedMem[bid + shared_size * 2]);
+		out_y[thread_id] = Y;
+		out_cb[thread_id] = Cb;
+		out_cr[thread_id] = Cr;
+	}
+}
+
+/*debug kernel*/
 /*
-kernel void convertRGBtoYCbCr(global float *in, global float *out) {
-	int WIDTH = get_global_size(0);
-	int HEIGHT = get_global_size(1);
-	// Don't do anything if we are on the edge.
-	if (get_global_id(0) == 0 || get_global_id(1) == 0)
-		return;
-	if (get_global_id(0) == (WIDTH - 1) || get_global_id(1) == (HEIGHT - 1))
-		return;
-	int y = get_global_id(1);
-	int x = get_global_id(0);
-	// Load the data
-	float a = in[WIDTH*(y - 1) + (x)];
-	float b = in[WIDTH*(y)+(x - 1)];
-	float c = in[WIDTH*(y + 1) + (x)];
-	float d = in[WIDTH*(y)+(x + 1)];
-	float e = in[WIDTH*y + x];
-	// Do the computation and write back the results
-	out[WIDTH*y + x] = (0.1*a + 0.2*b + 0.2*c + 0.1*d + 0.4*e);
+kernel void convertRGBtoYCbCr
+(
+	global float *in_rc, global float *in_gc, global float*in_bc, global float * out_y,
+	global float * out_cb, global float *out_cr, __local float * sharedMem, int shared_size, global int * block_size
+)
+{
+	int tid = get_global_id(0);
+
+
+	*block_size = get_local_size(0);
+	int bid = get_local_id(0);
+
+	for (int thread_id = tid; thread_id < SIZE_FRAME; thread_id += get_global_size(0)) {
+		float Y, Cb, Cr;
+		sharedMem[bid] = in_rc[thread_id];
+		sharedMem[bid + shared_size] = in_gc[thread_id];
+		sharedMem[bid + shared_size * 2] = in_bc[thread_id];
+
+		Y = 0 + ((float)0.299*sharedMem[bid]) + ((float)0.587*sharedMem[bid + shared_size]) + ((float)0.113*sharedMem[bid + shared_size * 2]);
+		Cb = 128 - ((float)0.168736*sharedMem[bid]) - ((float)0.331264*sharedMem[bid + shared_size]) + ((float)0.5*sharedMem[bid + shared_size * 2]);
+		Cr = 128 + ((float)0.5*sharedMem[bid]) - ((float)0.418688*sharedMem[bid + shared_size]) - ((float)0.081312*sharedMem[bid + shared_size * 2]);
+		out_y[thread_id] = Y;
+		out_cb[thread_id] = Cb;
+		out_cr[thread_id] = Cr;
+	}
 }*/

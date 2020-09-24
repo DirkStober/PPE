@@ -1,4 +1,4 @@
-#include <stdlib.h>
+﻿#include <stdlib.h>
 #include <stdio.h>
 #include <iostream>
 #include <math.h>
@@ -93,6 +93,7 @@ void openCL_convertRGBtoYCbCr(Image* in, Image * out, cl_kernel * kernel, cl_mem
 	cl_mem out_y = device_ptrs[3];
 	cl_mem out_cb = device_ptrs[4];
 	cl_mem out_cr = device_ptrs[5];
+	//cl_mem b_size = clCreateBuffer(opencl_context, CL_MEM_WRITE_ONLY,  sizeof(int), NULL, &error);
 	error = clEnqueueWriteBuffer(opencl_queue, in_r, CL_FALSE, 0, SIZE_FRAME * sizeof(float), in->rc->data, 0, NULL, NULL);
 	error = clEnqueueWriteBuffer(opencl_queue, in_g, CL_FALSE, 0, SIZE_FRAME * sizeof(float), in->gc->data, 0, NULL, NULL);
 	error = clEnqueueWriteBuffer(opencl_queue, in_b, CL_FALSE, 0, SIZE_FRAME * sizeof(float), in->bc->data, 0, NULL, NULL);
@@ -102,15 +103,24 @@ void openCL_convertRGBtoYCbCr(Image* in, Image * out, cl_kernel * kernel, cl_mem
 	clSetKernelArg(*kernel, 3, sizeof(out_y), &out_y);
 	clSetKernelArg(*kernel, 4, sizeof(out_cb), &out_cb);
 	clSetKernelArg(*kernel, 5, sizeof(out_cr), &out_cr);
-	size_t global_dimensions[] = { SIZE_FRAME,0,0 };
+	int h_s_size = 256;
+	clSetKernelArg(*kernel, 6, h_s_size *3 * sizeof(float), NULL);
+	clSetKernelArg(*kernel, 7, sizeof(int), &h_s_size);
+	//int h_block_s;
+	//clSetKernelArg(*kernel, 8, sizeof(b_size), &b_size);
+	size_t global_dimensions[] = { 2048 ,0,0 };
+	//size_t local_dimensions[] = { h_s_size };
 	error = clEnqueueNDRangeKernel(opencl_queue, *kernel, 1, NULL, global_dimensions, NULL, 0, NULL, NULL);
+
+
+	//error = clEnqueueReadBuffer(opencl_queue, b_size, CL_FALSE, 0, sizeof(int), &h_block_s, 0, NULL, NULL);
 	
 	//read the data
 	error = clEnqueueReadBuffer(opencl_queue, out_y, CL_FALSE, 0, SIZE_FRAME * sizeof(float), out->rc->data, 0, NULL, NULL);
 	error = clEnqueueReadBuffer(opencl_queue, out_cb, CL_FALSE, 0, SIZE_FRAME * sizeof(float), out->gc->data, 0, NULL, NULL);
 	error = clEnqueueReadBuffer(opencl_queue, out_cr, CL_FALSE, 0, SIZE_FRAME * sizeof(float), out->bc->data, 0, NULL, NULL);
 	error = clFinish(opencl_queue);
-
+	//std::cout << "BS: " << h_block_s;
 
 }
 
@@ -498,6 +508,8 @@ void setupCL(cl_kernel * kernel, cl_program * program) {
 	*kernel = clCreateKernel(*program, "convertRGBtoYCbCr", &error);
 	checkError(error, "clCreateKernel");
 	free(program_text);
+
+	/*Get some information about work group size*/
 }
 
 
