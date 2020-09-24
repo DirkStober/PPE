@@ -453,6 +453,54 @@ void encode8x8(Channel* ordered, SMatrix* encoded){
     }
 }
 
+void setupCL(cl_kernel * kernel, cl_program * program) {
+	// ======== Setup OpenCL
+	cl_platform_id platforms[10];
+	cl_device_id found_devices[10];
+	cl_uint     num_platforms;
+	cl_uint number_of_devices_found;
+	char platform_name[1000];
+	clGetPlatformIDs(10, platforms, &num_platforms);
+	for (int i = 0; i < num_platforms; i++) {
+		clGetPlatformInfo(platforms[i], CL_PLATFORM_NAME, 1000, platform_name, NULL);
+		//clGetDeviceIDs(platforms[i], CL_DEVICE_TYPE_GPU, 10, found_devices, &number_of_devices_found);
+		std::cout << "platform_name: " << platform_name << std::endl;
+	}
+
+	clGetDeviceIDs(platforms[0], CL_DEVICE_TYPE_GPU, 10, found_devices, &number_of_devices_found);
+	opencl_device = found_devices[0];
+	char device_name[1000];
+	clGetDeviceInfo(opencl_device, CL_DEVICE_NAME, 1000, device_name, NULL);
+	cout << "Device name : " << device_name << "\n";
+
+	opencl_context = clCreateContext(NULL, 1, &opencl_device, NULL, NULL, NULL);
+	opencl_queue = clCreateCommandQueue(opencl_context, opencl_device, CL_QUEUE_PROFILING_ENABLE, NULL);
+
+
+	FILE *file;
+	file = fopen("kernel.cl", "r");
+	struct stat stat_info;
+	int error = stat("kernel.cl", &stat_info);
+	if (error) {
+		printf("load_source_file: stat failed on file %s: %d\n", "kernel.cl", error);
+		exit(1);
+	}
+	char * program_text;
+	program_text = (char*)malloc(stat_info.st_size + 1);
+	memset(program_text, 0, stat_info.st_size + 1);
+
+	size_t result = fread(program_text, stat_info.st_size, 1, file);
+
+	*program = clCreateProgramWithSource(opencl_context, 1, (const char**)&program_text, NULL, &error);
+
+	error = clBuildProgram(*program, 1, &opencl_device, NULL, NULL, NULL);
+	checkError(error, "clBuildProgram");
+	*kernel = clCreateKernel(*program, "convertRGBtoYCbCr", &error);
+	checkError(error, "clCreateKernel");
+	free(program_text);
+}
+
+
 
 int encode() {
     int end_frame = int(N_FRAMES);
@@ -484,53 +532,11 @@ int encode() {
 
 	// ======== Initialize
 
-	// ======== Setup OpenCL
-	cl_platform_id platforms[10];
-	cl_device_id found_devices[10];
-	cl_uint     num_platforms;
-	cl_uint number_of_devices_found;
-	char platform_name[1000];
-	clGetPlatformIDs(10, platforms, &num_platforms);
-	for (int i = 0; i < num_platforms; i++) {
-		clGetPlatformInfo(platforms[i], CL_PLATFORM_NAME, 1000, platform_name, NULL);
-		//clGetDeviceIDs(platforms[i], CL_DEVICE_TYPE_GPU, 10, found_devices, &number_of_devices_found);
-		std::cout << "platform_name: " << platform_name << std::endl;
-	}
 
-	clGetDeviceIDs(platforms[0], CL_DEVICE_TYPE_GPU, 10, found_devices, &number_of_devices_found);
-	opencl_device = found_devices[0];
-	char device_name[1000];
-	clGetDeviceInfo(opencl_device, CL_DEVICE_NAME, 1000, device_name, NULL);
-	cout << "Device name : " << device_name << "\n";
-
-	opencl_context = clCreateContext(NULL, 1, &opencl_device, NULL, NULL, NULL);
-	opencl_queue = clCreateCommandQueue(opencl_context, opencl_device, CL_QUEUE_PROFILING_ENABLE, NULL);
-
-	
-	char *program_text;
-	FILE *file;
-	file = fopen("kernel.cl", "r");
-	struct stat stat_info;
-	int error = stat("kernel.cl", &stat_info);
-	if (error) {
-		printf("load_source_file: stat failed on file %s: %d\n", "kernel.cl", error);
-		exit(1);
-	}
-	
-	program_text = (char*)malloc(stat_info.st_size+1);
-	memset(program_text, 0, stat_info.st_size+1);
-	
-	size_t result = fread(program_text, stat_info.st_size, 1, file);
-
-	std:cout << program_text;
+	cl_kernel kernel;
 	cl_program program;
-	program = clCreateProgramWithSource(opencl_context, 1, (const char**)&program_text, NULL, &error);
-
-	error = clBuildProgram(program, 1, &opencl_device, NULL, NULL, NULL);
-	checkError(error, "clBuildProgram");
-	cl_kernel kernel = clCreateKernel(program, "convertRGBtoYCbCr", &error);
-	checkError(error, "clCreateKernel");
-
+	setupCL(&kernel,&program);
+	int error;
 
 	// Create the data objects
 	cl_mem device_ptrs[6];
@@ -725,7 +731,6 @@ int encode() {
 	}
 	clReleaseKernel(kernel);
 	clReleaseProgram(program);
-	free(program_text);
 
 	closeStats();
 	/* Uncoment to prevent visual studio output window from closing */
