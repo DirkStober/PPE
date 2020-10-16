@@ -10,6 +10,7 @@
 #ifdef USE_MATLAB
 
 #define SIZE_FRAME 128*128
+#define SIZE_ROW 128
 
 #define N_FRAMES 5
 #define I_FRAME_FREQ 2
@@ -23,6 +24,7 @@
 //
 #ifndef USE_MATLAB
 #define SIZE_FRAME 2048*2048
+#define SIZE_ROW 2048
 #define N_FRAMES 10
 #define I_FRAME_FREQ 1
 #define DUMP_TO_DEBUG false

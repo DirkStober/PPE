@@ -114,6 +114,33 @@ void openCL_convertRGBtoYCbCr(Image* in, Image * out, cl_kernel * kernel, cl_mem
 
 }
 
+void openCL_convert_lowPass(Image* in, Frame * out, cl_kernel * kernel, cl_mem * device_ptrs) {
+	int error;
+	cl_mem in_r = device_ptrs[0];
+	cl_mem in_g = device_ptrs[1];
+	cl_mem in_b = device_ptrs[2];
+	cl_mem out_y = device_ptrs[3];
+	cl_mem out_cb = device_ptrs[4];
+	cl_mem out_cr = device_ptrs[5];
+	error = clEnqueueWriteBuffer(opencl_queue, in_r, CL_FALSE, 0, SIZE_FRAME * sizeof(float), in->rc->data, 0, NULL, NULL);
+	error = clEnqueueWriteBuffer(opencl_queue, in_g, CL_FALSE, 0, SIZE_FRAME * sizeof(float), in->gc->data, 0, NULL, NULL);
+	error = clEnqueueWriteBuffer(opencl_queue, in_b, CL_FALSE, 0, SIZE_FRAME * sizeof(float), in->bc->data, 0, NULL, NULL);
+	size_t global_dimensions[] = { 128 ,0,0 };
+	error = clEnqueueNDRangeKernel(opencl_queue, kernel[0], 1, NULL, global_dimensions, NULL, 0, NULL, NULL);
+
+	error = clEnqueueReadBuffer(opencl_queue, out_y, CL_FALSE, 0, SIZE_FRAME * sizeof(float), out->Y->data, 0, NULL, NULL);
+
+	error = clEnqueueNDRangeKernel(opencl_queue, kernel[1], 1, NULL, global_dimensions, NULL, 0, NULL, NULL);
+	error = clEnqueueNDRangeKernel(opencl_queue, kernel[2], 1, NULL, global_dimensions, NULL, 0, NULL, NULL);
+
+
+	//read the data
+	error = clEnqueueReadBuffer(opencl_queue, out_cb, CL_FALSE, 0, SIZE_FRAME * sizeof(float), out->Cb->data, 0, NULL, NULL);
+	error = clEnqueueReadBuffer(opencl_queue, out_cr, CL_FALSE, 0, SIZE_FRAME * sizeof(float), out->Cr->data, 0, NULL, NULL);
+	error = clFinish(opencl_queue);
+
+}
+
 
 
 Channel* lowPass(Channel* in, Channel* out){
@@ -495,7 +522,9 @@ void setupCL(cl_kernel * kernel, cl_program * program) {
 
 	error = clBuildProgram(*program, 1, &opencl_device, NULL, NULL, NULL);
 	checkError(error, "clBuildProgram");
-	*kernel = clCreateKernel(*program, "convertRGBtoYCbCr", &error);
+	kernel[0] = clCreateKernel(*program, "convertRGBtoYCbCr", &error);
+	kernel[1] = clCreateKernel(*program, "first_sweep", &error);
+	kernel[2] = clCreateKernel(*program, "second_sweep", &error);
 	checkError(error, "clCreateKernel");
 	free(program_text);
 
@@ -535,19 +564,29 @@ int encode() {
 	// ======== Initialize
 
 
-	cl_kernel kernel;
+	cl_kernel  kernel[3];
 	cl_program program;
-	setupCL(&kernel,&program);
+	setupCL(kernel,&program);
 	int error;
 
 	// Create the data objects
 	cl_mem device_ptrs[6];
 	for (int i = 0; i < 3; i++) {
-		device_ptrs[i] = clCreateBuffer(opencl_context, CL_MEM_READ_ONLY, SIZE_FRAME * sizeof(float), NULL, &error);
+		device_ptrs[i] = clCreateBuffer(opencl_context, CL_MEM_READ_WRITE|| CL_MEM_HOST_WRITE_ONLY, SIZE_FRAME * sizeof(float), NULL, &error);
+		clSetKernelArg(kernel[0], i, sizeof(device_ptrs[i]), &device_ptrs[i]);
 	}
 	for (int i = 3; i < 6; i++) {
-		device_ptrs[i] = clCreateBuffer(opencl_context, CL_MEM_WRITE_ONLY, SIZE_FRAME * sizeof(float), NULL, &error);
+		device_ptrs[i] = clCreateBuffer(opencl_context, CL_MEM_READ_WRITE|| CL_MEM_HOST_READ_ONLY, SIZE_FRAME * sizeof(float), NULL, &error);
+		clSetKernelArg(kernel[0], i, sizeof(device_ptrs[i]), &device_ptrs[i]);
 	}
+	clSetKernelArg(kernel[1], 0, sizeof(&device_ptrs[4]), &device_ptrs[4]);
+	clSetKernelArg(kernel[1], 1, sizeof(device_ptrs[5]), &device_ptrs[5]);
+	clSetKernelArg(kernel[1], 2, sizeof(device_ptrs[1]), &device_ptrs[1]);
+	clSetKernelArg(kernel[1], 3, sizeof(device_ptrs[2]), &device_ptrs[2]);
+	clSetKernelArg(kernel[2], 0, sizeof(device_ptrs[1]), &device_ptrs[1]);
+	clSetKernelArg(kernel[2], 1, sizeof(device_ptrs[2]), &device_ptrs[2]);
+	clSetKernelArg(kernel[2], 2, sizeof(&device_ptrs[4]), &device_ptrs[4]);
+	clSetKernelArg(kernel[2], 3, sizeof(device_ptrs[5]), &device_ptrs[5]);
 
     for (int frame_number = 0 ; frame_number < end_frame ; frame_number++) {
 		frame_rgb = NULL;
@@ -557,36 +596,16 @@ int encode() {
 		print("Covert to YCbCr...");
         
 		Image* frame_ycbcr = new Image(width, height, FULLSIZE);
-		gettimeofday(&starttime, NULL);
-		//convertRGBtoYCbCr(frame_rgb, frame_ycbcr);
-		openCL_convertRGBtoYCbCr(frame_rgb, frame_ycbcr, &kernel, device_ptrs);
-		gettimeofday(&endtime, NULL);
-		runtime[0] = double(endtime.tv_sec)*1000.0f + double(endtime.tv_usec)/1000.0f - double(starttime.tv_sec)*1000.0f - double(starttime.tv_usec)/1000.0f; //in ms
-        
-		dump_image(frame_ycbcr, "frame_ycbcr", frame_number);
-		delete frame_rgb;
- 
-        // We low pass filter Cb and Cr channesl
-        print("Low pass filter..."); 
 
-		gettimeofday(&starttime, NULL);
-		Channel* frame_blur_cb = new Channel(width, height);
-        Channel* frame_blur_cr = new Channel(width, height);
 		Frame *frame_lowpassed = new Frame(width, height, FULLSIZE);
-		
-		lowPass(frame_ycbcr->gc, frame_blur_cb);
-		lowPass(frame_ycbcr->bc, frame_blur_cr);
-
-		frame_lowpassed->Y->copy(frame_ycbcr->rc);
-		frame_lowpassed->Cb->copy(frame_blur_cb);
-        frame_lowpassed->Cr->copy(frame_blur_cr);
+		gettimeofday(&starttime, NULL);
+		openCL_convert_lowPass(frame_rgb, frame_lowpassed, kernel, device_ptrs);
 		gettimeofday(&endtime, NULL);
+		runtime[0] = double(endtime.tv_sec)*1000.0f + double(endtime.tv_usec) / 1000.0f - double(starttime.tv_sec)*1000.0f - double(starttime.tv_usec) / 1000.0f; //in ms
 		runtime[1] = double(endtime.tv_sec)*1000.0f + double(endtime.tv_usec)/1000.0f - double(starttime.tv_sec)*1000.0f - double(starttime.tv_usec)/1000.0f; //in ms   
-        
+
+		dump_frame(frame_lowpassed, "frame_ycbcr", frame_number);
 		dump_frame(frame_lowpassed, "frame_ycbcr_lowpass", frame_number);
-		delete frame_ycbcr; 
-		delete frame_blur_cb; 
-		delete frame_blur_cr;
 
         Frame *frame_lowpassed_final = NULL;
  
@@ -731,7 +750,9 @@ int encode() {
 	for (int i = 0; i < 6; i++) {
 		clReleaseMemObject(device_ptrs[i]);
 	}
-	clReleaseKernel(kernel);
+	clReleaseKernel(kernel[0]);
+	clReleaseKernel(kernel[1]);
+	clReleaseKernel(kernel[2]);
 	clReleaseProgram(program);
 
 	closeStats();
