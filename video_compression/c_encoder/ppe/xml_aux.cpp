@@ -327,7 +327,7 @@ void dump_motion_vectors(int* motion, int frame_number) {
 
 */
 
-std::string function_name[10] = {"Convert to YCbCr:", "Low pass filter:", "Motion Vector Search:", "Compute Delta:", "Downsample:", "Convert to frequency domain:", "Quantize:", "Compute DC differences:", "Zig-zag order:", "Encode coefficients:"};
+std::string function_name[10] = {"Load Image:", "Convert & Low pass filter:", "Motion Vector Search:", "Compute Delta:", "Downsample:", "Convert to frequency domain:", "Quantize:", "Compute DC differences:", "Zig-zag order:", "Encode coefficients:"};
 double runtime_accum[10] = {0};
 
 void createStatsFile(void){

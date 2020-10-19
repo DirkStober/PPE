@@ -304,9 +304,9 @@ void dct8x8(Channel* in, Channel* out){
         in->data[i] -= 128;
         out->data[i] = 0; //zeros
     }
- 
-    for(int y=0; y<width; y+=8) {
-        for(int x=0; x<height; x+=8) {
+
+	for (int x = 0; x<height; x += 8) {
+		for(int y=0; y<width; y+=8) {
             dct8x8_block(&(in->data[x*width+y]),&(out->data[x*width+y]), width);
         }
     }
@@ -324,9 +324,9 @@ void round_block(float* in, float* out, int stride){
         {49, 64, 78, 87, 103, 121, 120, 101},
         {72, 92, 95, 98, 112, 100, 103, 99},
     };
- 
-    for(int y=0; y<8; y++) {
-        for(int x=0; x<8; x++) { 
+
+	for (int x = 0; x<8; x++) {
+		for(int y=0; y<8; y++) {
             quantMatrix[x][y] = ceil(quantMatrix[x][y]/QUALITY);
             out[x*stride+y] = (float)round(in[x*stride+y]/quantMatrix[x][y]);
         }
@@ -341,9 +341,9 @@ void quant8x8(Channel* in, Channel* out) {
     for(int i=0; i<width*height; i++) {
         out->data[i]=0; //zeros
     }
-    
-    for (int y=0; y<width; y+=8) {
-        for (int x=0; x<height; x+=8) {       
+
+	for (int x = 0; x<height; x += 8) {
+		for (int y=0; y<width; y+=8) {    
             round_block(&(in->data[x*width+y]), &(out->data[x*width+y]), width);
         }
     }
@@ -404,9 +404,9 @@ void zigZagOrder(Channel* in, Channel* ordered) {
      
     int blockNumber=0;
     float _block[MPEG_CONSTANT];
- 
-    for(int x=0; x<height; x+=8) {
-        for(int y=0; y<width; y+=8) {
+
+	for(int y = 0; y<width; y += 8) {
+		for(int x=0; x<height; x+=8) {
              cpyBlock(&(in->data[x*width+y]), _block, 8, width); //block = in(x:x+7,y:y+7);
             //Put the coefficients in zig-zag order
             float zigZagOrdered[MPEG_CONSTANT] = { 0 };
@@ -432,8 +432,6 @@ void encode8x8(Channel* ordered, SMatrix* encoded){
             block_encode[j]="\0"; //necessary to initialize every string position to empty string
         }
 
-		double* block = new double[width];
-        for(int y=0; y<width; y++) block[y] = ordered->data[i*width+y];
         int num_coeff = MPEG_CONSTANT; //width
         int encoded_index = 0;
         int in_zero_run = 0;
@@ -441,7 +439,7 @@ void encode8x8(Channel* ordered, SMatrix* encoded){
  
         // Skip DC coefficient
         for(int c=1; c<num_coeff; c++){
-            double coeff = block[c];
+            float coeff = ordered->data[i*width + c];
             if (coeff == 0){
                 if (in_zero_run == 0){
                     zero_count = 0;
@@ -476,7 +474,6 @@ void encode8x8(Channel* ordered, SMatrix* encoded){
             else
                 it = MPEG_CONSTANT;
         }
-		delete block;
     }
 }
 
@@ -590,7 +587,10 @@ int encode() {
 
     for (int frame_number = 0 ; frame_number < end_frame ; frame_number++) {
 		frame_rgb = NULL;
+		gettimeofday(&starttime, NULL);
         loadImage(frame_number, image_path, &frame_rgb);
+		gettimeofday(&endtime, NULL);
+		runtime[0] = double(endtime.tv_sec)*1000.0f + double(endtime.tv_usec) / 1000.0f - double(starttime.tv_sec)*1000.0f - double(starttime.tv_usec) / 1000.0f; //in ms
 
         //  Convert to YCbCr
 		print("Covert to YCbCr...");
@@ -601,7 +601,6 @@ int encode() {
 		gettimeofday(&starttime, NULL);
 		openCL_convert_lowPass(frame_rgb, frame_lowpassed, kernel, device_ptrs);
 		gettimeofday(&endtime, NULL);
-		runtime[0] = double(endtime.tv_sec)*1000.0f + double(endtime.tv_usec) / 1000.0f - double(starttime.tv_sec)*1000.0f - double(starttime.tv_usec) / 1000.0f; //in ms
 		runtime[1] = double(endtime.tv_sec)*1000.0f + double(endtime.tv_usec)/1000.0f - double(starttime.tv_sec)*1000.0f - double(starttime.tv_usec)/1000.0f; //in ms   
 
 		dump_frame(frame_lowpassed, "frame_ycbcr", frame_number);
