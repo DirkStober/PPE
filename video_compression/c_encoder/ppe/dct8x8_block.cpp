@@ -14,14 +14,14 @@ void dct8x8_block(float* in_8x8, float* out, int stride){
 	for(int row_number=0; row_number< 8; row_number++){
         
     	//sample image value initialization from input matrix
-		double f0=in_8x8[row_number*stride+0];
-		double f1=in_8x8[row_number*stride+1];
-		double f2=in_8x8[row_number*stride+2];
-		double f3=in_8x8[row_number*stride+3];
-		double f4=in_8x8[row_number*stride+4];
-		double f5=in_8x8[row_number*stride+5];
-		double f6=in_8x8[row_number*stride+6];
-		double f7=in_8x8[row_number*stride+7];
+		double f0=in_8x8[row_number*stride+0] - 128;
+		double f1=in_8x8[row_number*stride+1] - 128;
+		double f2=in_8x8[row_number*stride+2] - 128;
+		double f3=in_8x8[row_number*stride+3] - 128;
+		double f4=in_8x8[row_number*stride+4] - 128;
+		double f5=in_8x8[row_number*stride+5] - 128;
+		double f6=in_8x8[row_number*stride+6] - 128;
+		double f7=in_8x8[row_number*stride+7] - 128;
         
    		//first stage of FLOWGRAPH (Chen,Fralick and Smith)
 		double i0=f0+f7;

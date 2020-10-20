@@ -10,10 +10,15 @@
 #include "xml_aux.h"
 #include "dct8x8_block.h"
 #include <vector>
+#include <atomic>
 #include "gettimeofday.h"
 #include "config.h"
 #include <CL/cl.h>
 #include "opencl_utils.h"
+#include <omp.h>
+
+
+
 cl_device_id opencl_device;
 cl_context opencl_context;
 cl_command_queue opencl_queue;
@@ -282,13 +287,12 @@ Channel* downSample(Channel* in){
 
 	Channel* out = new Channel((width/2),(height/2));
 
+	for (int x2 = 0, x = 0; x2<h2; x2++) {
 		for(int y2=0,y=0; y2<w2; y2++) {
-			for (int x2 = 0, x = 0; x2<h2; x2++) {
-
             out->data[x2*w2+y2]= in->data[x*width+y];
-            x+=2;
+			y += 2;
         }
-        y+=2;
+		x += 2;
     }
  
     return out;
@@ -301,7 +305,7 @@ void dct8x8(Channel* in, Channel* out){
 
     // 8x8 block dct on each block
     for(int i=0; i<width*height; i++) {
-        in->data[i] -= 128;
+        //in->data[i] -= 128;
         out->data[i] = 0; //zeros
     }
 
@@ -398,26 +402,26 @@ void cpyBlock(float* in, float* out, int blocksize, int stride) {
 void zigZagOrder(Channel* in, Channel* ordered) {
 	int width = in->width;
 	int height = in->height;
-    int zigZagIndex[64]={0,1,8,16,9,2,3,10,17,24,32,25,18,11,4,5,12,19,26,33,40,
-        48,41,34,27,20,13,6,7,14,21,28,35,42,49,56,57,50,43,36,29,22,15,23,30,37,
-        44,51,58,59,52,45,38,31,39,46,53,60,61,54,47,55,62,63};
-     
-    int blockNumber=0;
-    float _block[MPEG_CONSTANT];
+	int zigZagIndex[64] = { 0,1,8,16,9,2,3,10,17,24,32,25,18,11,4,5,12,19,26,33,40,
+		48,41,34,27,20,13,6,7,14,21,28,35,42,49,56,57,50,43,36,29,22,15,23,30,37,
+		44,51,58,59,52,45,38,31,39,46,53,60,61,54,47,55,62,63 };
 
-	for(int y = 0; y<width; y += 8) {
-		for(int x=0; x<height; x+=8) {
-             cpyBlock(&(in->data[x*width+y]), _block, 8, width); //block = in(x:x+7,y:y+7);
-            //Put the coefficients in zig-zag order
-            float zigZagOrdered[MPEG_CONSTANT] = { 0 };
-            for (int index=0; index < MPEG_CONSTANT; index++){
-                zigZagOrdered[index] = _block[zigZagIndex[index]];
-            }
-            for (int i=0; i<MPEG_CONSTANT; i++) 
-                ordered->data[blockNumber*MPEG_CONSTANT+i] = zigZagOrdered[i];
-            blockNumber++;
-        }
-    }
+	int blockNumber = 0;
+	float _block[MPEG_CONSTANT];
+
+	for (int x = 0; x<height; x += 8) {
+		for (int y = 0; y<width; y += 8) {
+			cpyBlock(&(in->data[x*width + y]), _block, 8, width); //block = in(x:x+7,y:y+7);
+																  //Put the coefficients in zig-zag order
+			float zigZagOrdered[MPEG_CONSTANT] = { 0 };
+			for (int index = 0; index < MPEG_CONSTANT; index++) {
+				zigZagOrdered[index] = _block[zigZagIndex[index]];
+			}
+			for (int i = 0; i<MPEG_CONSTANT; i++)
+				ordered->data[blockNumber*MPEG_CONSTANT + i] = zigZagOrdered[i];
+			blockNumber++;
+		}
+	}
 }
 
 
@@ -530,6 +534,45 @@ void setupCL(cl_kernel * kernel, cl_program * program) {
 
 
 
+void blocked_ds_dct_round(Channel * data_in , Channel * data_out )
+{
+
+
+	for (int y = 0; y < (SIZE_ROW / 2); y += 8)
+	{
+		for (int x = 0; x < (SIZE_ROW / 2); x += 8)
+		{
+			for (int yy = y; yy < (y + 8); yy++)
+			{
+				for (int xx = x; xx < (x + 8); xx++)
+				{
+					data_out->data[yy*(SIZE_ROW / 2) + xx] = data_in->data[yy * 2 * SIZE_ROW + xx * 2];
+				}
+			}
+			dct8x8_block(&data_out->data[y*(SIZE_ROW / 2) + x], &data_out->data[y*(SIZE_ROW / 2) + x], (SIZE_ROW / 2));
+			round_block(&data_out->data[y*(SIZE_ROW / 2) + x], &data_out->data[y*(SIZE_ROW / 2) + x], (SIZE_ROW / 2));
+		}
+	}
+}
+
+void blocked_dct_round(Channel * data_in, Channel * data_out)
+{
+	for (int y = 0; y < SIZE_ROW; y += 8)
+	{
+		for (int x = 0; x < SIZE_ROW; x += 8)
+		{
+			dct8x8_block(&data_in->data[y*(SIZE_ROW) + x], &data_out->data[y*(SIZE_ROW) + x], (SIZE_ROW));
+			round_block(&data_out->data[y*(SIZE_ROW) + x], &data_out->data[y*(SIZE_ROW) + x], (SIZE_ROW));
+		}
+	}
+
+}
+
+
+
+
+
+
 int encode() {
     int end_frame = int(N_FRAMES);
     int i_frame_frequency = int(I_FRAME_FREQ);
@@ -585,12 +628,15 @@ int encode() {
 	clSetKernelArg(kernel[2], 2, sizeof(&device_ptrs[4]), &device_ptrs[4]);
 	clSetKernelArg(kernel[2], 3, sizeof(device_ptrs[5]), &device_ptrs[5]);
 
+
+
     for (int frame_number = 0 ; frame_number < end_frame ; frame_number++) {
 		frame_rgb = NULL;
 		gettimeofday(&starttime, NULL);
         loadImage(frame_number, image_path, &frame_rgb);
 		gettimeofday(&endtime, NULL);
 		runtime[0] = double(endtime.tv_sec)*1000.0f + double(endtime.tv_usec) / 1000.0f - double(starttime.tv_sec)*1000.0f - double(starttime.tv_usec) / 1000.0f; //in ms
+
 
         //  Convert to YCbCr
 		print("Covert to YCbCr...");
@@ -637,55 +683,34 @@ int encode() {
         previous_frame_lowpassed = new Frame(frame_lowpassed_final); 
 		
  
-        // Downsample the difference
-		print("Downsample...");
-		
+
+
+		Frame* frame_quant = new Frame(width, height, DOWNSAMPLE);
+
+		/* Blocking for downsample etc*/
+		//int block_size = 32;
+
+
+
+		print("Started blocked conversion");
+
 		gettimeofday(&starttime, NULL);
-        Frame* frame_downsampled = new Frame(width, height, DOWNSAMPLE);
- 		
-        // We don't touch the Y frame
-		frame_downsampled->Y->copy(frame_lowpassed_final->Y);
-        Channel* frame_downsampled_cb = downSample(frame_lowpassed_final->Cb);
-		frame_downsampled->Cb->copy(frame_downsampled_cb);       
-        Channel* frame_downsampled_cr = downSample(frame_lowpassed_final->Cr);
-		frame_downsampled->Cr->copy(frame_downsampled_cr);
-        gettimeofday(&endtime, NULL);
-		runtime[4] = double(endtime.tv_sec)*1000.0f + double(endtime.tv_usec)/1000.0f - double(starttime.tv_sec)*1000.0f - double(starttime.tv_usec)/1000.0f; //in ms 
+		blocked_ds_dct_round(frame_lowpassed_final->Cr, frame_quant->Cr);
+		gettimeofday(&endtime, NULL);
+		runtime[4] = double(endtime.tv_sec)*1000.0f + double(endtime.tv_usec) / 1000.0f - double(starttime.tv_sec)*1000.0f - double(starttime.tv_usec) / 1000.0f; //in ms 
 
-        dump_frame(frame_downsampled, "frame_downsampled", frame_number);
-		delete frame_lowpassed_final; 
-		delete frame_downsampled_cb; 
-		delete frame_downsampled_cr; 
-
-        // Convert to frequency domain
-		print("Convert to frequency domain...");
-        
 		gettimeofday(&starttime, NULL);
-		Frame* frame_dct = new Frame(width, height, DOWNSAMPLE);
-		
-        dct8x8(frame_downsampled->Y, frame_dct->Y);
-        dct8x8(frame_downsampled->Cb, frame_dct->Cb);
-        dct8x8(frame_downsampled->Cr, frame_dct->Cr);
-        gettimeofday(&endtime, NULL);
-		runtime[5] = double(endtime.tv_sec)*1000.0f + double(endtime.tv_usec)/1000.0f - double(starttime.tv_sec)*1000.0f - double(starttime.tv_usec)/1000.0f; //in ms 
+		blocked_ds_dct_round(frame_lowpassed_final->Cb, frame_quant->Cb);
+		gettimeofday(&endtime, NULL);
+		runtime[5] = double(endtime.tv_sec)*1000.0f + double(endtime.tv_usec) / 1000.0f - double(starttime.tv_sec)*1000.0f - double(starttime.tv_usec) / 1000.0f; //in ms 
 
-        dump_frame(frame_dct, "frame_dct", frame_number);
-		delete frame_downsampled;
-		
-        //Quantize the data
-		print("Quantize...");
-		
 		gettimeofday(&starttime, NULL);
-        Frame* frame_quant = new Frame(width, height, DOWNSAMPLE);
+		blocked_dct_round(frame_lowpassed_final->Y, frame_quant->Y);
+		gettimeofday(&endtime, NULL);
+		runtime[6] = double(endtime.tv_sec)*1000.0f + double(endtime.tv_usec) / 1000.0f - double(starttime.tv_sec)*1000.0f - double(starttime.tv_usec) / 1000.0f; //in ms 
 
-        quant8x8(frame_dct->Y, frame_quant->Y);
-		quant8x8(frame_dct->Cb, frame_quant->Cb);
-		quant8x8(frame_dct->Cr, frame_quant->Cr);
-        gettimeofday(&endtime, NULL);
-		runtime[6] = double(endtime.tv_sec)*1000.0f + double(endtime.tv_usec)/1000.0f - double(starttime.tv_sec)*1000.0f - double(starttime.tv_usec)/1000.0f; //in ms      
-        
+
 		dump_frame(frame_quant, "frame_quant", frame_number);
-		delete frame_dct;
 
         //Extract the DC components and compute the differences
 		print("Compute DC differences...");
@@ -696,6 +721,8 @@ int encode() {
         dcDiff(frame_quant->Y, frame_dc_diff->Y);
         dcDiff(frame_quant->Cb, frame_dc_diff->Cb);
         dcDiff(frame_quant->Cr, frame_dc_diff->Cr);
+		
+		delete frame_lowpassed_final;
 		gettimeofday(&endtime, NULL);
 		runtime[7] = double(endtime.tv_sec)*1000.0f + double(endtime.tv_usec)/1000.0f - double(starttime.tv_sec)*1000.0f - double(starttime.tv_usec)/1000.0f; //in ms      
          
@@ -722,16 +749,16 @@ int encode() {
 		gettimeofday(&starttime, NULL);
 		FrameEncode* frame_encode = new FrameEncode(width, height, MPEG_CONSTANT);
  
-        encode8x8(frame_zigzag->Y, frame_encode->Y);
-        encode8x8(frame_zigzag->Cb, frame_encode->Cb);
-        encode8x8(frame_zigzag->Cr, frame_encode->Cr);
+        //encode8x8(frame_zigzag->Y, frame_encode->Y);
+        //encode8x8(frame_zigzag->Cb, frame_encode->Cb);
+        //encode8x8(frame_zigzag->Cr, frame_encode->Cr);
 		gettimeofday(&endtime, NULL);
 		runtime[9] = double(endtime.tv_sec)*1000.0f + double(endtime.tv_usec)/1000.0f - double(starttime.tv_sec)*1000.0f - double(starttime.tv_usec)/1000.0f; //in ms  
        
 		delete frame_zigzag;
 	       
-        stream_frame(stream, frame_number, motion_vectors, frame_number-1, frame_dc_diff, frame_encode);
-        write_stream(stream_path, stream);
+        //stream_frame(stream, frame_number, motion_vectors, frame_number-1, frame_dc_diff, frame_encode);
+        //write_stream(stream_path, stream);
 
 		delete frame_dc_diff;
 		delete frame_encode;
