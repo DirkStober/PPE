@@ -119,7 +119,7 @@ void openCL_convertRGBtoYCbCr(Image* in, Image * out, cl_kernel * kernel, cl_mem
 
 }
 
-void openCL_convert_lowPass(Image* in, Frame * out, cl_kernel * kernel, cl_mem * device_ptrs) {
+void openCL_convert_lowPass(Image* in, Frame * out, cl_kernel * kernel, cl_mem * device_ptrs, cl_event * frame_event) {
 	int error;
 	cl_mem in_r = device_ptrs[0];
 	cl_mem in_g = device_ptrs[1];
@@ -141,8 +141,8 @@ void openCL_convert_lowPass(Image* in, Frame * out, cl_kernel * kernel, cl_mem *
 
 	//read the data
 	error = clEnqueueReadBuffer(opencl_queue, out_cb, CL_FALSE, 0, SIZE_FRAME * sizeof(float), out->Cb->data, 0, NULL, NULL);
-	error = clEnqueueReadBuffer(opencl_queue, out_cr, CL_FALSE, 0, SIZE_FRAME * sizeof(float), out->Cr->data, 0, NULL, NULL);
-	error = clFinish(opencl_queue);
+	error = clEnqueueReadBuffer(opencl_queue, out_cr, CL_FALSE, 0, SIZE_FRAME * sizeof(float), out->Cr->data, 0, NULL, frame_event);
+	//error = clFinish(opencl_queue);
 
 }
 
@@ -406,10 +406,16 @@ void zigZagOrder(Channel* in, Channel* ordered) {
 		48,41,34,27,20,13,6,7,14,21,28,35,42,49,56,57,50,43,36,29,22,15,23,30,37,
 		44,51,58,59,52,45,38,31,39,46,53,60,61,54,47,55,62,63 };
 
-	int blockNumber = 0;
+
+	int tid = omp_get_thread_num();
+	int size = omp_get_num_threads();
+	
+	int blockNumber = tid* width /8;
 	float _block[MPEG_CONSTANT];
 
-	for (int x = 0; x<height; x += 8) {
+
+	for (int x = tid*8; x<height; x += size*8) {
+		blockNumber = x/8 * width / 8;
 		for (int y = 0; y<width; y += 8) {
 			cpyBlock(&(in->data[x*width + y]), _block, 8, width); //block = in(x:x+7,y:y+7);
 																  //Put the coefficients in zig-zag order
@@ -429,8 +435,11 @@ void encode8x8(Channel* ordered, SMatrix* encoded){
 	int width = encoded->height;
 	int height = encoded->width;
     int num_blocks = height;
-    
-	for(int i=0; i<num_blocks; i++) {
+
+	int tid = omp_get_thread_num();
+	int size = omp_get_num_threads();
+
+	for(int i=tid; i<num_blocks; i+=size) {
 		std::string block_encode[MPEG_CONSTANT];
 		for (int j=0; j<MPEG_CONSTANT; j++) {
             block_encode[j]="\0"; //necessary to initialize every string position to empty string
@@ -538,7 +547,10 @@ void blocked_ds_dct_round(Channel * data_in , Channel * data_out )
 {
 
 
-	for (int y = 0; y < (SIZE_ROW / 2); y += 8)
+	
+	int tid = omp_get_thread_num();
+	int size = omp_get_num_threads();
+	for (int y = 8 * tid; y < (SIZE_ROW / 2); y += 8* size)
 	{
 		for (int x = 0; x < (SIZE_ROW / 2); x += 8)
 		{
@@ -557,7 +569,9 @@ void blocked_ds_dct_round(Channel * data_in , Channel * data_out )
 
 void blocked_dct_round(Channel * data_in, Channel * data_out)
 {
-	for (int y = 0; y < SIZE_ROW; y += 8)
+	int tid = omp_get_thread_num();
+	int size = omp_get_num_threads();
+	for (int y = 8*tid; y < SIZE_ROW; y += 8*size)
 	{
 		for (int x = 0; x < SIZE_ROW; x += 8)
 		{
@@ -630,163 +644,191 @@ int encode() {
 
 	std::vector< Frame*> loaded_images(end_frame);
 	std::vector<std::mutex> loaded_images_mutex(end_frame);
-	for (int i = 0; i < end_frame; i++) {
-		loaded_images_mutex[i].lock();
-	}
-	omp_set_num_threads(2);
 
-	#pragma omp parallel 
+	std::vector<xmlDocPtr> encoded_images(end_frame);
+	std::vector<std::mutex> encoded_images_mutex(end_frame);
+
+
+	int num_threads = 5;
+
+
+	//omp_set_num_threads(num_threads);
+
+	cl_event *loaded_events = new cl_event[end_frame];
+
+	omp_set_nested(1);
+	#pragma omp parallel num_threads(2)
 	{
-		#pragma omp single nowait
-		for (int i = 0; i < end_frame; i++) {
-			Image * load_RGB = new Image(SIZE_ROW,SIZE_ROW,0);
-			loaded_images[i] = new Frame(SIZE_ROW, SIZE_ROW, 0);
-			print("LoadImage...");
-			loadImage(i, image_path, &load_RGB);
-			print("Covert to YCbCr...");
-			openCL_convert_lowPass(load_RGB, loaded_images[i], kernel, device_ptrs);
-			loaded_images_mutex[i].unlock();
-			std::cout << "Tid: " << omp_get_thread_num()<< std::endl;
+		int tid = omp_get_thread_num();
+		if (tid == 1) {
+			for (int i = 0; i < end_frame; i++) {
+				loaded_images_mutex[i].lock();
+			}
 		}
-
-
-
-		#pragma omp single
-		for (int frame_number = 0; frame_number < end_frame; frame_number++) {
-			std::cout << "Tid: " << omp_get_thread_num() << std::endl;
-			frame_rgb = NULL;
-			gettimeofday(&starttime, NULL);
-
-			loaded_images_mutex[frame_number].lock();
-			loaded_images_mutex[frame_number].unlock();
-
-			gettimeofday(&endtime, NULL);
-			runtime[0] = double(endtime.tv_sec)*1000.0f + double(endtime.tv_usec) / 1000.0f - double(starttime.tv_sec)*1000.0f - double(starttime.tv_usec) / 1000.0f; //in ms
-			runtime[1] = 0;//double(endtime.tv_sec)*1000.0f + double(endtime.tv_usec) / 1000.0f - double(starttime.tv_sec)*1000.0f - double(starttime.tv_usec) / 1000.0f; //in ms   
-			Frame *frame_lowpassed = loaded_images[frame_number];
-			dump_frame(frame_lowpassed, "frame_ycbcr", frame_number);
-			dump_frame(frame_lowpassed, "frame_ycbcr_lowpass", frame_number);
-			//  Convert to YCbCr
-
-			Frame *frame_lowpassed_final = NULL;
-
-			if (frame_number % i_frame_frequency != 0) {
-				// We have a P frame 
-				// Note that in the first iteration we don't enter this branch!
-
-				//Compute the motion vectors
-				print("Motion Vector Search...");
-
-				gettimeofday(&starttime, NULL);
-				motion_vectors = motionVectorSearch(previous_frame_lowpassed, frame_lowpassed, frame_lowpassed->width, frame_lowpassed->height);
-				gettimeofday(&endtime, NULL);
-				runtime[2] = double(endtime.tv_sec)*1000.0f + double(endtime.tv_usec) / 1000.0f - double(starttime.tv_sec)*1000.0f - double(starttime.tv_usec) / 1000.0f; //in ms 
-
-				print("Compute Delta...");
-				gettimeofday(&starttime, NULL);
-				frame_lowpassed_final = computeDelta(previous_frame_lowpassed, frame_lowpassed, motion_vectors);
-				gettimeofday(&endtime, NULL);
-				runtime[3] = double(endtime.tv_sec)*1000.0f + double(endtime.tv_usec) / 1000.0f - double(starttime.tv_sec)*1000.0f - double(starttime.tv_usec) / 1000.0f; //in ms 
-
+		else if (tid == 0) {
+			for (int i = 0; i < end_frame; i++) {
+				encoded_images_mutex[i].lock();
 			}
-			else {
-				// We have a I frame 
-				motion_vectors = NULL;
-				frame_lowpassed_final = new Frame(frame_lowpassed);
+		}
+		#pragma omp barrier
+		if(tid == 1)
+			{
+				for (int i = 0; i < end_frame; i++) {
+					Image * load_RGB = new Image(SIZE_ROW, SIZE_ROW, 0);
+					loaded_images[i] = new Frame(SIZE_ROW, SIZE_ROW, 0);
+					//printf("Loading Frame %d...\n",i);
+					loadImage(i, image_path, &load_RGB);
+					openCL_convert_lowPass(load_RGB, loaded_images[i], kernel, device_ptrs,&loaded_events[i]);
+					loaded_images_mutex[i].unlock();
+					//printf("Frame %d ready...\n", i);
+				}
+				for (int i = 0; i < end_frame; i++) {
+					//print("WriteImage..."); 
+					encoded_images_mutex[i].lock();
+					write_stream(stream_path, encoded_images[i]);
+					encoded_images_mutex[i].unlock();
+
+				}
 			}
-			delete frame_lowpassed; frame_lowpassed = NULL;
-
-			if (frame_number > 0) delete previous_frame_lowpassed;
-			previous_frame_lowpassed = new Frame(frame_lowpassed_final);
-
-
-
-
+		else {
+			Frame * frame_lowpassed_a_final;
 			Frame* frame_quant = new Frame(width, height, DOWNSAMPLE);
-
-			/* Blocking for downsample etc*/
-			//int block_size = 32;
-
-
-
-			print("Started blocked conversion");
-
-			gettimeofday(&starttime, NULL);
-			blocked_ds_dct_round(frame_lowpassed_final->Cr, frame_quant->Cr);
-			gettimeofday(&endtime, NULL);
-			runtime[4] = double(endtime.tv_sec)*1000.0f + double(endtime.tv_usec) / 1000.0f - double(starttime.tv_sec)*1000.0f - double(starttime.tv_usec) / 1000.0f; //in ms 
-
-			gettimeofday(&starttime, NULL);
-			blocked_ds_dct_round(frame_lowpassed_final->Cb, frame_quant->Cb);
-			gettimeofday(&endtime, NULL);
-			runtime[5] = double(endtime.tv_sec)*1000.0f + double(endtime.tv_usec) / 1000.0f - double(starttime.tv_sec)*1000.0f - double(starttime.tv_usec) / 1000.0f; //in ms 
-
-			gettimeofday(&starttime, NULL);
-			blocked_dct_round(frame_lowpassed_final->Y, frame_quant->Y);
-			gettimeofday(&endtime, NULL);
-			runtime[6] = double(endtime.tv_sec)*1000.0f + double(endtime.tv_usec) / 1000.0f - double(starttime.tv_sec)*1000.0f - double(starttime.tv_usec) / 1000.0f; //in ms 
-
-
-			dump_frame(frame_quant, "frame_quant", frame_number);
-
-			//Extract the DC components and compute the differences
-			print("Compute DC differences...");
-
-			gettimeofday(&starttime, NULL);
-			Frame* frame_dc_diff = new Frame(1, (width / 8)*(height / 8), DCDIFF); //dealocate later
-
-			dcDiff(frame_quant->Y, frame_dc_diff->Y);
-			dcDiff(frame_quant->Cb, frame_dc_diff->Cb);
-			dcDiff(frame_quant->Cr, frame_dc_diff->Cr);
-
-			delete frame_lowpassed_final;
-			gettimeofday(&endtime, NULL);
-			runtime[7] = double(endtime.tv_sec)*1000.0f + double(endtime.tv_usec) / 1000.0f - double(starttime.tv_sec)*1000.0f - double(starttime.tv_usec) / 1000.0f; //in ms      
-
-			dump_dc_diff(frame_dc_diff, "frame_dc_diff", frame_number);
-
-			// Zig-zag order for zero-counting
-			print("Zig-zag order...");
-			gettimeofday(&starttime, NULL);
-
 			Frame* frame_zigzag = new Frame(MPEG_CONSTANT, width*height / MPEG_CONSTANT, ZIGZAG);
-
-			zigZagOrder(frame_quant->Y, frame_zigzag->Y);
-			zigZagOrder(frame_quant->Cb, frame_zigzag->Cb);
-			zigZagOrder(frame_quant->Cr, frame_zigzag->Cr);
-			gettimeofday(&endtime, NULL);
-			runtime[8] = double(endtime.tv_sec)*1000.0f + double(endtime.tv_usec) / 1000.0f - double(starttime.tv_sec)*1000.0f - double(starttime.tv_usec) / 1000.0f; //in ms  
-
-			dump_zigzag(frame_zigzag, "frame_zigzag", frame_number);
-			delete frame_quant;
-
-			// Encode coefficients
-			print("Encode coefficients...");
-
-			gettimeofday(&starttime, NULL);
 			FrameEncode* frame_encode = new FrameEncode(width, height, MPEG_CONSTANT);
+			#pragma omp parallel num_threads(4)
+			{
+				int tid = omp_get_thread_num();
+				for (int frame_number = 0; frame_number < end_frame; frame_number += 1) {
 
-			//encode8x8(frame_zigzag->Y, frame_encode->Y);
-			//encode8x8(frame_zigzag->Cb, frame_encode->Cb);
-			//encode8x8(frame_zigzag->Cr, frame_encode->Cr);
-			gettimeofday(&endtime, NULL);
-			runtime[9] = double(endtime.tv_sec)*1000.0f + double(endtime.tv_usec) / 1000.0f - double(starttime.tv_sec)*1000.0f - double(starttime.tv_usec) / 1000.0f; //in ms  
+					frame_rgb = NULL;
+					gettimeofday(&starttime, NULL);
 
-			delete frame_zigzag;
+					if (tid == 0) {
+						loaded_images_mutex[frame_number].lock();
+						loaded_images_mutex[frame_number].unlock();
+						clWaitForEvents(1, &loaded_events[frame_number]);
+						frame_lowpassed_a_final = loaded_images[frame_number];
+						//dump_frame(frame_lowpassed_a_final, "frame_ycbcr_lowpass", frame_number);
 
-			stream_frame(stream, frame_number, motion_vectors, frame_number - 1, frame_dc_diff, frame_encode);
-			write_stream(stream_path, stream);
 
-			delete frame_dc_diff;
-			delete frame_encode;
+						#ifdef motionVEC
+						Frame *frame_lowpassed_final = NULL;
 
-			if (motion_vectors != NULL) {
-				free(motion_vectors);
-				motion_vectors = NULL;
+						if (frame_number % i_frame_frequency != 0) {
+							// We have a P frame 
+							// Note that in the first iteration we don't enter this branch!
+
+							//Compute the motion vectors
+							print("Motion Vector Search...");
+
+							gettimeofday(&starttime, NULL);
+							motion_vectors = motionVectorSearch(previous_frame_lowpassed, frame_lowpassed, frame_lowpassed->width, frame_lowpassed->height);
+							gettimeofday(&endtime, NULL);
+							runtime[2] = double(endtime.tv_sec)*1000.0f + double(endtime.tv_usec) / 1000.0f - double(starttime.tv_sec)*1000.0f - double(starttime.tv_usec) / 1000.0f; //in ms 
+
+							print("Compute Delta...");
+							gettimeofday(&starttime, NULL);
+							frame_lowpassed_final = computeDelta(previous_frame_lowpassed, frame_lowpassed, motion_vectors);
+							gettimeofday(&endtime, NULL);
+							runtime[3] = double(endtime.tv_sec)*1000.0f + double(endtime.tv_usec) / 1000.0f - double(starttime.tv_sec)*1000.0f - double(starttime.tv_usec) / 1000.0f; //in ms 
+
+						}
+						else {
+							// We have a I frame 
+							motion_vectors = NULL;
+							frame_lowpassed_final = new Frame(frame_lowpassed);
+						}
+						delete frame_lowpassed; frame_lowpassed = NULL;
+
+						if (frame_number > 0) delete previous_frame_lowpassed;
+						previous_frame_lowpassed = new Frame(frame_lowpassed_final);
+
+
+
+
+
+						/* Blocking for downsample etc*/
+
+
+
+						print("Started blocked conversion");
+						frame_lowpassed_a_final = frame_lowpassed_final;
+						#endif
+					}
+					
+					#pragma omp barrier	
+
+					
+					gettimeofday(&starttime, NULL);
+					blocked_ds_dct_round(frame_lowpassed_a_final->Cr, frame_quant->Cr);
+					gettimeofday(&endtime, NULL);
+					runtime[4] = double(endtime.tv_sec)*1000.0f + double(endtime.tv_usec) / 1000.0f - double(starttime.tv_sec)*1000.0f - double(starttime.tv_usec) / 1000.0f; //in ms 
+
+					gettimeofday(&starttime, NULL);
+					blocked_ds_dct_round(frame_lowpassed_a_final->Cb, frame_quant->Cb);
+					gettimeofday(&endtime, NULL);
+					runtime[5] = double(endtime.tv_sec)*1000.0f + double(endtime.tv_usec) / 1000.0f - double(starttime.tv_sec)*1000.0f - double(starttime.tv_usec) / 1000.0f; //in ms 
+
+					gettimeofday(&starttime, NULL);
+					blocked_dct_round(frame_lowpassed_a_final->Y, frame_quant->Y);
+					gettimeofday(&endtime, NULL);
+					runtime[6] = double(endtime.tv_sec)*1000.0f + double(endtime.tv_usec) / 1000.0f - double(starttime.tv_sec)*1000.0f - double(starttime.tv_usec) / 1000.0f; //in ms 
+
+					#pragma omp barrier	
+					Frame* frame_dc_diff;
+					if (tid == 0) {
+						dump_frame(frame_quant, "frame_quant", frame_number);
+
+
+						gettimeofday(&starttime, NULL);
+						frame_dc_diff = new Frame(1, (width / 8)*(height / 8), DCDIFF); //dealocate later
+
+						dcDiff(frame_quant->Y, frame_dc_diff->Y);
+						dcDiff(frame_quant->Cb, frame_dc_diff->Cb);
+						dcDiff(frame_quant->Cr, frame_dc_diff->Cr);
+
+						//delete frame_lowpassed_a_final;
+						gettimeofday(&endtime, NULL);
+						runtime[7] = double(endtime.tv_sec)*1000.0f + double(endtime.tv_usec) / 1000.0f - double(starttime.tv_sec)*1000.0f - double(starttime.tv_usec) / 1000.0f; //in ms      
+
+						//dump_dc_diff(frame_dc_diff, "frame_dc_diff", frame_number);
+						// Zig-zag order for zero-counting
+					}
+
+						
+
+					zigZagOrder(frame_quant->Y, frame_zigzag->Y);
+					zigZagOrder(frame_quant->Cb, frame_zigzag->Cb);
+					zigZagOrder(frame_quant->Cr, frame_zigzag->Cr);
+
+					encode8x8(frame_zigzag->Y, frame_encode->Y);
+					encode8x8(frame_zigzag->Cb, frame_encode->Cb);
+					encode8x8(frame_zigzag->Cr, frame_encode->Cr);
+
+					#pragma omp barrier	
+					if(tid==0){
+						dump_zigzag(frame_zigzag, "frame_zigzag", frame_number);
+
+						
+
+						stream_frame(encoded_images[frame_number], frame_number, motion_vectors, frame_number - 1, frame_dc_diff, frame_encode);
+						encoded_images_mutex[frame_number].unlock();
+						//write_stream(stream_path, stream);
+
+						delete frame_dc_diff;
+
+						if (motion_vectors != NULL) {
+							free(motion_vectors);
+							motion_vectors = NULL;
+						}
+
+						writestats(frame_number, frame_number % i_frame_frequency, runtime);
+					}
+				}
 			}
-
-			writestats(frame_number, frame_number % i_frame_frequency, runtime);
-
+			delete frame_quant;
+			delete frame_zigzag;
+			delete frame_encode;
 		}
 	}
 
@@ -808,6 +850,11 @@ int encode() {
  
  
 int main(int args, char** argv){
+	struct timeval starttime, endtime;
+	gettimeofday(&starttime, NULL);
     encode();
+	gettimeofday(&endtime, NULL);
+	double runtime = double(endtime.tv_sec)*1000.0f + double(endtime.tv_usec) / 1000.0f - double(starttime.tv_sec)*1000.0f - double(starttime.tv_usec) / 1000.0f; //in ms  
+	printf("Total runtime : %lf\n", runtime);
     return 0;
 }
