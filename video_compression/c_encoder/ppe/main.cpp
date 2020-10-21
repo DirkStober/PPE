@@ -10,7 +10,7 @@
 #include "xml_aux.h"
 #include "dct8x8_block.h"
 #include <vector>
-#include <atomic>
+#include <mutex>
 #include "gettimeofday.h"
 #include "config.h"
 #include <CL/cl.h>
@@ -625,152 +625,170 @@ int encode() {
 	clSetKernelArg(kernel[1], 3, sizeof(device_ptrs[2]), &device_ptrs[2]);
 	clSetKernelArg(kernel[2], 0, sizeof(device_ptrs[1]), &device_ptrs[1]);
 	clSetKernelArg(kernel[2], 1, sizeof(device_ptrs[2]), &device_ptrs[2]);
-	clSetKernelArg(kernel[2], 2, sizeof(&device_ptrs[4]), &device_ptrs[4]);
+	clSetKernelArg(kernel[2], 2, sizeof(device_ptrs[4]), &device_ptrs[4]);
 	clSetKernelArg(kernel[2], 3, sizeof(device_ptrs[5]), &device_ptrs[5]);
 
+	std::vector< Frame*> loaded_images(end_frame);
+	std::vector<std::mutex> loaded_images_mutex(end_frame);
+	for (int i = 0; i < end_frame; i++) {
+		loaded_images_mutex[i].lock();
+	}
+	omp_set_num_threads(2);
+
+	#pragma omp parallel 
+	{
+		#pragma omp single nowait
+		for (int i = 0; i < end_frame; i++) {
+			Image * load_RGB = new Image(SIZE_ROW,SIZE_ROW,0);
+			loaded_images[i] = new Frame(SIZE_ROW, SIZE_ROW, 0);
+			print("LoadImage...");
+			loadImage(i, image_path, &load_RGB);
+			print("Covert to YCbCr...");
+			openCL_convert_lowPass(load_RGB, loaded_images[i], kernel, device_ptrs);
+			loaded_images_mutex[i].unlock();
+			std::cout << "Tid: " << omp_get_thread_num()<< std::endl;
+		}
 
 
-    for (int frame_number = 0 ; frame_number < end_frame ; frame_number++) {
-		frame_rgb = NULL;
-		gettimeofday(&starttime, NULL);
-        loadImage(frame_number, image_path, &frame_rgb);
-		gettimeofday(&endtime, NULL);
-		runtime[0] = double(endtime.tv_sec)*1000.0f + double(endtime.tv_usec) / 1000.0f - double(starttime.tv_sec)*1000.0f - double(starttime.tv_usec) / 1000.0f; //in ms
 
-
-        //  Convert to YCbCr
-		print("Covert to YCbCr...");
-        
-		Image* frame_ycbcr = new Image(width, height, FULLSIZE);
-
-		Frame *frame_lowpassed = new Frame(width, height, FULLSIZE);
-		gettimeofday(&starttime, NULL);
-		openCL_convert_lowPass(frame_rgb, frame_lowpassed, kernel, device_ptrs);
-		gettimeofday(&endtime, NULL);
-		runtime[1] = double(endtime.tv_sec)*1000.0f + double(endtime.tv_usec)/1000.0f - double(starttime.tv_sec)*1000.0f - double(starttime.tv_usec)/1000.0f; //in ms   
-
-		dump_frame(frame_lowpassed, "frame_ycbcr", frame_number);
-		dump_frame(frame_lowpassed, "frame_ycbcr_lowpass", frame_number);
-
-        Frame *frame_lowpassed_final = NULL;
- 
-        if (frame_number % i_frame_frequency != 0) { 
-            // We have a P frame 
-            // Note that in the first iteration we don't enter this branch!
-            
-			//Compute the motion vectors
-			print("Motion Vector Search...");
-
+		#pragma omp single
+		for (int frame_number = 0; frame_number < end_frame; frame_number++) {
+			std::cout << "Tid: " << omp_get_thread_num() << std::endl;
+			frame_rgb = NULL;
 			gettimeofday(&starttime, NULL);
-            motion_vectors = motionVectorSearch(previous_frame_lowpassed, frame_lowpassed, frame_lowpassed->width, frame_lowpassed->height);
-            gettimeofday(&endtime, NULL);
-			runtime[2] = double(endtime.tv_sec)*1000.0f + double(endtime.tv_usec)/1000.0f - double(starttime.tv_sec)*1000.0f - double(starttime.tv_usec)/1000.0f; //in ms 
 
-			print("Compute Delta...");
-			gettimeofday(&starttime, NULL);
-            frame_lowpassed_final = computeDelta(previous_frame_lowpassed, frame_lowpassed, motion_vectors);
+			loaded_images_mutex[frame_number].lock();
+			loaded_images_mutex[frame_number].unlock();
+
 			gettimeofday(&endtime, NULL);
-			runtime[3] = double(endtime.tv_sec)*1000.0f + double(endtime.tv_usec)/1000.0f - double(starttime.tv_sec)*1000.0f - double(starttime.tv_usec)/1000.0f; //in ms 
+			runtime[0] = double(endtime.tv_sec)*1000.0f + double(endtime.tv_usec) / 1000.0f - double(starttime.tv_sec)*1000.0f - double(starttime.tv_usec) / 1000.0f; //in ms
+			runtime[1] = 0;//double(endtime.tv_sec)*1000.0f + double(endtime.tv_usec) / 1000.0f - double(starttime.tv_sec)*1000.0f - double(starttime.tv_usec) / 1000.0f; //in ms   
+			Frame *frame_lowpassed = loaded_images[frame_number];
+			dump_frame(frame_lowpassed, "frame_ycbcr", frame_number);
+			dump_frame(frame_lowpassed, "frame_ycbcr_lowpass", frame_number);
+			//  Convert to YCbCr
 
-        } else {
-            // We have a I frame 
-            motion_vectors = NULL;
-            frame_lowpassed_final = new Frame(frame_lowpassed);
-        }
-		delete frame_lowpassed; frame_lowpassed=NULL;
+			Frame *frame_lowpassed_final = NULL;
 
-		if (frame_number > 0) delete previous_frame_lowpassed;
-        previous_frame_lowpassed = new Frame(frame_lowpassed_final); 
-		
- 
+			if (frame_number % i_frame_frequency != 0) {
+				// We have a P frame 
+				// Note that in the first iteration we don't enter this branch!
 
+				//Compute the motion vectors
+				print("Motion Vector Search...");
 
-		Frame* frame_quant = new Frame(width, height, DOWNSAMPLE);
+				gettimeofday(&starttime, NULL);
+				motion_vectors = motionVectorSearch(previous_frame_lowpassed, frame_lowpassed, frame_lowpassed->width, frame_lowpassed->height);
+				gettimeofday(&endtime, NULL);
+				runtime[2] = double(endtime.tv_sec)*1000.0f + double(endtime.tv_usec) / 1000.0f - double(starttime.tv_sec)*1000.0f - double(starttime.tv_usec) / 1000.0f; //in ms 
 
-		/* Blocking for downsample etc*/
-		//int block_size = 32;
+				print("Compute Delta...");
+				gettimeofday(&starttime, NULL);
+				frame_lowpassed_final = computeDelta(previous_frame_lowpassed, frame_lowpassed, motion_vectors);
+				gettimeofday(&endtime, NULL);
+				runtime[3] = double(endtime.tv_sec)*1000.0f + double(endtime.tv_usec) / 1000.0f - double(starttime.tv_sec)*1000.0f - double(starttime.tv_usec) / 1000.0f; //in ms 
 
+			}
+			else {
+				// We have a I frame 
+				motion_vectors = NULL;
+				frame_lowpassed_final = new Frame(frame_lowpassed);
+			}
+			delete frame_lowpassed; frame_lowpassed = NULL;
 
-
-		print("Started blocked conversion");
-
-		gettimeofday(&starttime, NULL);
-		blocked_ds_dct_round(frame_lowpassed_final->Cr, frame_quant->Cr);
-		gettimeofday(&endtime, NULL);
-		runtime[4] = double(endtime.tv_sec)*1000.0f + double(endtime.tv_usec) / 1000.0f - double(starttime.tv_sec)*1000.0f - double(starttime.tv_usec) / 1000.0f; //in ms 
-
-		gettimeofday(&starttime, NULL);
-		blocked_ds_dct_round(frame_lowpassed_final->Cb, frame_quant->Cb);
-		gettimeofday(&endtime, NULL);
-		runtime[5] = double(endtime.tv_sec)*1000.0f + double(endtime.tv_usec) / 1000.0f - double(starttime.tv_sec)*1000.0f - double(starttime.tv_usec) / 1000.0f; //in ms 
-
-		gettimeofday(&starttime, NULL);
-		blocked_dct_round(frame_lowpassed_final->Y, frame_quant->Y);
-		gettimeofday(&endtime, NULL);
-		runtime[6] = double(endtime.tv_sec)*1000.0f + double(endtime.tv_usec) / 1000.0f - double(starttime.tv_sec)*1000.0f - double(starttime.tv_usec) / 1000.0f; //in ms 
+			if (frame_number > 0) delete previous_frame_lowpassed;
+			previous_frame_lowpassed = new Frame(frame_lowpassed_final);
 
 
-		dump_frame(frame_quant, "frame_quant", frame_number);
 
-        //Extract the DC components and compute the differences
-		print("Compute DC differences...");
-        
-		gettimeofday(&starttime, NULL);  
-		Frame* frame_dc_diff = new Frame(1, (width/8)*(height/8), DCDIFF); //dealocate later
-		   
-        dcDiff(frame_quant->Y, frame_dc_diff->Y);
-        dcDiff(frame_quant->Cb, frame_dc_diff->Cb);
-        dcDiff(frame_quant->Cr, frame_dc_diff->Cr);
-		
-		delete frame_lowpassed_final;
-		gettimeofday(&endtime, NULL);
-		runtime[7] = double(endtime.tv_sec)*1000.0f + double(endtime.tv_usec)/1000.0f - double(starttime.tv_sec)*1000.0f - double(starttime.tv_usec)/1000.0f; //in ms      
-         
-        dump_dc_diff(frame_dc_diff, "frame_dc_diff", frame_number);
 
-		// Zig-zag order for zero-counting
-		print("Zig-zag order...");
-        gettimeofday(&starttime, NULL);
-		
-		Frame* frame_zigzag = new Frame(MPEG_CONSTANT, width*height/MPEG_CONSTANT, ZIGZAG);
-		
-        zigZagOrder(frame_quant->Y, frame_zigzag->Y);
-        zigZagOrder(frame_quant->Cb, frame_zigzag->Cb);
-        zigZagOrder(frame_quant->Cr, frame_zigzag->Cr);
-		gettimeofday(&endtime, NULL);
-		runtime[8] = double(endtime.tv_sec)*1000.0f + double(endtime.tv_usec)/1000.0f - double(starttime.tv_sec)*1000.0f - double(starttime.tv_usec)/1000.0f; //in ms  
-        
-		dump_zigzag(frame_zigzag, "frame_zigzag", frame_number);
-		delete frame_quant;
- 
-        // Encode coefficients
-		print("Encode coefficients...");
-        
-		gettimeofday(&starttime, NULL);
-		FrameEncode* frame_encode = new FrameEncode(width, height, MPEG_CONSTANT);
- 
-        //encode8x8(frame_zigzag->Y, frame_encode->Y);
-        //encode8x8(frame_zigzag->Cb, frame_encode->Cb);
-        //encode8x8(frame_zigzag->Cr, frame_encode->Cr);
-		gettimeofday(&endtime, NULL);
-		runtime[9] = double(endtime.tv_sec)*1000.0f + double(endtime.tv_usec)/1000.0f - double(starttime.tv_sec)*1000.0f - double(starttime.tv_usec)/1000.0f; //in ms  
-       
-		delete frame_zigzag;
-	       
-        //stream_frame(stream, frame_number, motion_vectors, frame_number-1, frame_dc_diff, frame_encode);
-        //write_stream(stream_path, stream);
+			Frame* frame_quant = new Frame(width, height, DOWNSAMPLE);
 
-		delete frame_dc_diff;
-		delete frame_encode;
- 
-        if (motion_vectors != NULL) {
-            free(motion_vectors);
-			motion_vectors = NULL;
-        }
+			/* Blocking for downsample etc*/
+			//int block_size = 32;
 
-		writestats(frame_number, frame_number % i_frame_frequency, runtime);
 
-    }
+
+			print("Started blocked conversion");
+
+			gettimeofday(&starttime, NULL);
+			blocked_ds_dct_round(frame_lowpassed_final->Cr, frame_quant->Cr);
+			gettimeofday(&endtime, NULL);
+			runtime[4] = double(endtime.tv_sec)*1000.0f + double(endtime.tv_usec) / 1000.0f - double(starttime.tv_sec)*1000.0f - double(starttime.tv_usec) / 1000.0f; //in ms 
+
+			gettimeofday(&starttime, NULL);
+			blocked_ds_dct_round(frame_lowpassed_final->Cb, frame_quant->Cb);
+			gettimeofday(&endtime, NULL);
+			runtime[5] = double(endtime.tv_sec)*1000.0f + double(endtime.tv_usec) / 1000.0f - double(starttime.tv_sec)*1000.0f - double(starttime.tv_usec) / 1000.0f; //in ms 
+
+			gettimeofday(&starttime, NULL);
+			blocked_dct_round(frame_lowpassed_final->Y, frame_quant->Y);
+			gettimeofday(&endtime, NULL);
+			runtime[6] = double(endtime.tv_sec)*1000.0f + double(endtime.tv_usec) / 1000.0f - double(starttime.tv_sec)*1000.0f - double(starttime.tv_usec) / 1000.0f; //in ms 
+
+
+			dump_frame(frame_quant, "frame_quant", frame_number);
+
+			//Extract the DC components and compute the differences
+			print("Compute DC differences...");
+
+			gettimeofday(&starttime, NULL);
+			Frame* frame_dc_diff = new Frame(1, (width / 8)*(height / 8), DCDIFF); //dealocate later
+
+			dcDiff(frame_quant->Y, frame_dc_diff->Y);
+			dcDiff(frame_quant->Cb, frame_dc_diff->Cb);
+			dcDiff(frame_quant->Cr, frame_dc_diff->Cr);
+
+			delete frame_lowpassed_final;
+			gettimeofday(&endtime, NULL);
+			runtime[7] = double(endtime.tv_sec)*1000.0f + double(endtime.tv_usec) / 1000.0f - double(starttime.tv_sec)*1000.0f - double(starttime.tv_usec) / 1000.0f; //in ms      
+
+			dump_dc_diff(frame_dc_diff, "frame_dc_diff", frame_number);
+
+			// Zig-zag order for zero-counting
+			print("Zig-zag order...");
+			gettimeofday(&starttime, NULL);
+
+			Frame* frame_zigzag = new Frame(MPEG_CONSTANT, width*height / MPEG_CONSTANT, ZIGZAG);
+
+			zigZagOrder(frame_quant->Y, frame_zigzag->Y);
+			zigZagOrder(frame_quant->Cb, frame_zigzag->Cb);
+			zigZagOrder(frame_quant->Cr, frame_zigzag->Cr);
+			gettimeofday(&endtime, NULL);
+			runtime[8] = double(endtime.tv_sec)*1000.0f + double(endtime.tv_usec) / 1000.0f - double(starttime.tv_sec)*1000.0f - double(starttime.tv_usec) / 1000.0f; //in ms  
+
+			dump_zigzag(frame_zigzag, "frame_zigzag", frame_number);
+			delete frame_quant;
+
+			// Encode coefficients
+			print("Encode coefficients...");
+
+			gettimeofday(&starttime, NULL);
+			FrameEncode* frame_encode = new FrameEncode(width, height, MPEG_CONSTANT);
+
+			//encode8x8(frame_zigzag->Y, frame_encode->Y);
+			//encode8x8(frame_zigzag->Cb, frame_encode->Cb);
+			//encode8x8(frame_zigzag->Cr, frame_encode->Cr);
+			gettimeofday(&endtime, NULL);
+			runtime[9] = double(endtime.tv_sec)*1000.0f + double(endtime.tv_usec) / 1000.0f - double(starttime.tv_sec)*1000.0f - double(starttime.tv_usec) / 1000.0f; //in ms  
+
+			delete frame_zigzag;
+
+			stream_frame(stream, frame_number, motion_vectors, frame_number - 1, frame_dc_diff, frame_encode);
+			write_stream(stream_path, stream);
+
+			delete frame_dc_diff;
+			delete frame_encode;
+
+			if (motion_vectors != NULL) {
+				free(motion_vectors);
+				motion_vectors = NULL;
+			}
+
+			writestats(frame_number, frame_number % i_frame_frequency, runtime);
+
+		}
+	}
 
 	// Cleanup
 	for (int i = 0; i < 6; i++) {
