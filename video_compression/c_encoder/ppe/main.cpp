@@ -16,6 +16,7 @@
 #include <CL/cl.h>
 #include "opencl_utils.h"
 #include <omp.h>
+#include <immintrin.h>
 
 
 
@@ -584,6 +585,290 @@ void blocked_dct_round(Channel * data_in, Channel * data_out)
 
 
 
+void motionVectorSearch(Frame* source, Frame* match,Frame * delta, int width, int height, std::vector<mVector> *motion_vectors) {
+	//std::vector<mVector> *motion_vectors = new std::vector<mVector>(); // empty list of ints
+
+		int d_width = source->width;
+	int d_height = source->height;
+
+	float Y_weight = 2;
+	float Cr_weight = 1;
+	float Cb_weight = 1;
+
+	uint16_t yw_vec[16] = {
+		Y_weight, Y_weight, Y_weight, Y_weight,
+		Y_weight, Y_weight, Y_weight, Y_weight,
+		Y_weight, Y_weight, Y_weight, Y_weight,
+		Y_weight, Y_weight, Y_weight, Y_weight,
+	};
+	uint16_t crw_vec[16] = {
+		Cr_weight, Cr_weight, Cr_weight, Cr_weight,
+		Cr_weight, Cr_weight, Cr_weight, Cr_weight,
+		Cr_weight, Cr_weight, Cr_weight, Cr_weight,
+		Cr_weight, Cr_weight, Cr_weight, Cr_weight,
+	};
+	uint16_t cbw_vec[16] = {
+		Cb_weight, Cb_weight, Cb_weight, Cb_weight,
+		Cb_weight, Cb_weight, Cb_weight, Cb_weight,
+		Cb_weight, Cb_weight, Cb_weight, Cb_weight,
+		Cb_weight, Cb_weight, Cb_weight, Cb_weight,
+	};
+
+	__m256i
+		mm_yweight = _mm256_load_si256((const __m256i *)yw_vec),
+		mm_crweight = _mm256_load_si256((const __m256i *)crw_vec),
+		mm_cbweight = _mm256_load_si256((const __m256i *)cbw_vec);
+
+	//Window size is how much on each side of the block we search
+	int window_size = 8;
+	int block_size = 8;
+
+	//How far from the edge we can go since we don't special case the edges
+	int inset = (int)max((float)window_size, (float)block_size);
+	int iter = 0;
+	inset = 16;
+	int tid = omp_get_thread_num();
+	int size = omp_get_num_threads();
+	for (int my = inset + tid*block_size; my < width - (inset + window_size) + 1; my += block_size*size) {
+		for (int mx = inset; mx < height - (inset + window_size) + 1; mx += block_size) {
+
+			uint16_t zeros[16 * 16][16 * 2] = { 0 };
+
+			for (int outer_loop = 0; outer_loop < 16; ++outer_loop)
+			{
+
+				int
+					match_x = mx + outer_loop,
+					match_y = my;
+				__m256
+					mmatch_y1 = _mm256_load_ps(&(match->Y->data[match_x*width + match_y])),
+					mmatch_cb1 = _mm256_load_ps(&(match->Cb->data[match_x*width + match_y])),
+					mmatch_cr1 = _mm256_load_ps(&(match->Cr->data[match_x*width + match_y]));
+
+				__m256i
+					mmatch32_y1 = _mm256_cvtps_epi32(mmatch_y1),
+					mmatch32_cb1 = _mm256_cvtps_epi32(mmatch_cb1),
+					mmatch32_cr1 = _mm256_cvtps_epi32(mmatch_cr1);
+
+				__m256i
+					mmatch16_y1 = _mm256_packus_epi32(mmatch32_y1, mmatch32_y1),
+					mmatch16_cb1 = _mm256_packus_epi32(mmatch32_cb1, mmatch32_cb1),
+					mmatch16_cr1 = _mm256_packus_epi32(mmatch32_cr1, mmatch32_cr1);
+
+				const int
+					perm_mask = 0b11011000;
+				//perm_mask = 0b00100111;
+
+				mmatch16_y1 = _mm256_permute4x64_epi64(mmatch16_y1, perm_mask),
+					mmatch16_cb1 = _mm256_permute4x64_epi64(mmatch16_cb1, perm_mask),
+					mmatch16_cr1 = _mm256_permute4x64_epi64(mmatch16_cr1, perm_mask);
+
+				__m256i
+					mmatch8_y = _mm256_packus_epi16(mmatch16_y1, mmatch16_y1),
+					mmatch8_cb = _mm256_packus_epi16(mmatch16_cb1, mmatch16_cb1),
+					mmatch8_cr = _mm256_packus_epi16(mmatch16_cr1, mmatch16_cr1);
+
+				mmatch8_y = _mm256_permute4x64_epi64(mmatch8_y, perm_mask),
+					mmatch8_cb = _mm256_permute4x64_epi64(mmatch8_cb, perm_mask),
+					mmatch8_cr = _mm256_permute4x64_epi64(mmatch8_cr, perm_mask);
+
+				for (int inner_loop = outer_loop - window_size, y_idx = outer_loop;
+					inner_loop < outer_loop;
+					inner_loop++, y_idx += 8)
+				{
+
+
+					/*
+					Do one row of sads
+					*/
+
+
+					/*
+					First half
+					*/
+
+					int sx = mx - window_size;
+					int search_x = sx;
+					int search_y = inner_loop;
+					__m256
+						msearch_y1 = _mm256_load_ps(&(source->Y->data[search_x*width + search_y])),
+						msearch_cb1 = _mm256_load_ps(&(source->Cb->data[search_x*width + search_y])),
+						msearch_cr1 = _mm256_load_ps(&(source->Cr->data[search_x*width + search_y])),
+						msearch_y2 = _mm256_load_ps(&(source->Y->data[search_x*width + search_y + 8])),
+						msearch_cb2 = _mm256_load_ps(&(source->Cb->data[search_x*width + search_y + 8])),
+						msearch_cr2 = _mm256_load_ps(&(source->Cr->data[search_x*width + search_y + 8]));
+
+
+					__m256i
+						msearch32_y1 = _mm256_cvtps_epi32(msearch_y1),
+						msearch32_cb1 = _mm256_cvtps_epi32(msearch_cb1),
+						msearch32_cr1 = _mm256_cvtps_epi32(msearch_cr1),
+						msearch32_y2 = _mm256_cvtps_epi32(msearch_y2),
+						msearch32_cb2 = _mm256_cvtps_epi32(msearch_cb2),
+						msearch32_cr2 = _mm256_cvtps_epi32(msearch_cr2);
+
+					__m256i
+						msearch16_y1 = _mm256_packus_epi32(msearch32_y1, msearch32_y2),
+						msearch16_cb1 = _mm256_packus_epi32(msearch32_cb1, msearch32_cb2),
+						msearch16_cr1 = _mm256_packus_epi32(msearch32_cr1, msearch32_cr2);
+
+					msearch16_y1 = _mm256_permute4x64_epi64(msearch16_y1, perm_mask),
+						msearch16_cb1 = _mm256_permute4x64_epi64(msearch16_cb1, perm_mask),
+						msearch16_cr1 = _mm256_permute4x64_epi64(msearch16_cr1, perm_mask);
+
+					__m256i
+						msearch8_y = _mm256_packus_epi16(msearch16_y1, msearch16_y1),
+						msearch8_cb = _mm256_packus_epi16(msearch16_cb1, msearch16_cb1),
+						msearch8_cr = _mm256_packus_epi16(msearch16_cr1, msearch16_cr1);
+
+					msearch8_y = _mm256_permute4x64_epi64(msearch8_y, perm_mask),
+						msearch8_cb = _mm256_permute4x64_epi64(msearch8_cb, perm_mask),
+						msearch8_cr = _mm256_permute4x64_epi64(msearch8_cr, perm_mask);
+
+					/*
+					Compute all sums for one row[window_size * 2]
+					*/
+
+					const int
+						offset_mask = 0b101000;
+
+					__m256i
+						//sums = _mm256_load_si256((const __m256i*) zeros[y_idx]),
+						sum_y = _mm256_mpsadbw_epu8(msearch8_y, mmatch8_y, offset_mask),
+						sum_cb = _mm256_mpsadbw_epu8(msearch8_cb, mmatch8_cb, offset_mask),
+						sum_cr = _mm256_mpsadbw_epu8(msearch8_cr, mmatch8_cr, offset_mask);
+
+					__m256i
+						wsum_y = _mm256_mullo_epi16(sum_y, mm_yweight),
+						wsum_cb = _mm256_mullo_epi16(sum_cb, mm_cbweight),
+						wsum_cr = _mm256_mullo_epi16(sum_cr, mm_crweight);
+					__m256i
+						sums = _mm256_add_epi16(
+							_mm256_add_epi16(wsum_y, wsum_cb),
+							wsum_cr);
+
+					_mm256_store_si256((__m256i*) &zeros[y_idx], sums);
+
+					/*sx = mx - window_size;
+					search_x = sx;
+					search_y = inner_loop;*/
+
+					/*
+					Second half
+					*/
+
+					__m256
+						msearch_y3 = _mm256_load_ps(&(source->Y->data[search_x*width + search_y + 16])),
+						msearch_cb3 = _mm256_load_ps(&(source->Cb->data[search_x*width + search_y + 16])),
+						msearch_cr3 = _mm256_load_ps(&(source->Cr->data[search_x*width + search_y + 16])),
+						msearch_y4 = _mm256_load_ps(&(source->Y->data[search_x*width + search_y + 24])),
+						msearch_cb4 = _mm256_load_ps(&(source->Cb->data[search_x*width + search_y + 24])),
+						msearch_cr4 = _mm256_load_ps(&(source->Cr->data[search_x*width + search_y + 24]));
+
+
+					__m256i
+						msearch32_y3 = _mm256_cvtps_epi32(msearch_y3),
+						msearch32_cb3 = _mm256_cvtps_epi32(msearch_cb3),
+						msearch32_cr3 = _mm256_cvtps_epi32(msearch_cr3),
+						msearch32_y4 = _mm256_cvtps_epi32(msearch_y4),
+						msearch32_cb4 = _mm256_cvtps_epi32(msearch_cb4),
+						msearch32_cr4 = _mm256_cvtps_epi32(msearch_cr4);
+
+					__m256i
+						msearch16_y2 = _mm256_packus_epi32(msearch32_y3, msearch32_y4),
+						msearch16_cb2 = _mm256_packus_epi32(msearch32_cb3, msearch32_cb4),
+						msearch16_cr2 = _mm256_packus_epi32(msearch32_cr3, msearch32_cr4);
+
+					msearch16_y2 = _mm256_permute4x64_epi64(msearch16_y2, perm_mask),
+						msearch16_cb2 = _mm256_permute4x64_epi64(msearch16_cb2, perm_mask),
+						msearch16_cr2 = _mm256_permute4x64_epi64(msearch16_cr2, perm_mask);
+
+					__m256i
+						msearch8_y2 = _mm256_packus_epi16(msearch16_y2, msearch16_y2),
+						msearch8_cb2 = _mm256_packus_epi16(msearch16_cb2, msearch16_cb2),
+						msearch8_cr2 = _mm256_packus_epi16(msearch16_cr2, msearch16_cr2);
+
+					msearch8_y2 = _mm256_permute4x64_epi64(msearch8_y2, perm_mask),
+						msearch8_cb2 = _mm256_permute4x64_epi64(msearch8_cb2, perm_mask),
+						msearch8_cr2 = _mm256_permute4x64_epi64(msearch8_cr2, perm_mask);
+
+
+					sum_y = _mm256_mpsadbw_epu8(msearch8_y2, mmatch8_y, offset_mask),
+						sum_cb = _mm256_mpsadbw_epu8(msearch8_cb2, mmatch8_cb, offset_mask),
+						sum_cr = _mm256_mpsadbw_epu8(msearch8_cr2, mmatch8_cr, offset_mask);
+
+
+					wsum_y = _mm256_mullo_epi16(sum_y, mm_yweight),
+						wsum_cb = _mm256_mullo_epi16(sum_cb, mm_cbweight),
+						wsum_cr = _mm256_mullo_epi16(sum_cr, mm_crweight);
+					sums = _mm256_add_epi16(
+						_mm256_add_epi16(wsum_y, wsum_cb),
+						wsum_cr);
+
+					_mm256_store_si256((__m256i*) &zeros[y_idx + 16], sums);
+				}
+			}
+
+
+			///
+			int best_match_location[2] = { 0, 0 };
+			for (int other_loop = 0,
+				best_sum = 0xFFFFFFFF,
+				sy = my - window_size;
+				other_loop < 16;
+				++other_loop,
+				++sy)
+			{
+				//for (int second_loop = 0; second_loop < 8; ++second_loop)
+
+				for (int g_x = 0,
+					sx = mx - window_size;
+					g_x < 8;
+					++g_x, ++sx)
+				{
+					uint32_t temp_sum = 0;
+					for (int curr_sum_idx = 0; curr_sum_idx < 8; ++curr_sum_idx)
+					{
+						int
+							y = curr_sum_idx * 1 + other_loop * 8,
+							x1 = 0 + g_x,
+							x2 = 8 + g_x,
+							x3 = 16 + g_x,
+							x4 = 24 + g_x;
+						temp_sum += zeros[y][x1] + zeros[y][x2];
+					}
+
+					if (temp_sum < best_sum)
+					{
+						best_sum = temp_sum;
+						best_match_location[0] = sx - mx;
+						best_match_location[1] = sy - my;
+					}
+				}
+			}
+			mVector v;
+			v.a = best_match_location[0];
+			v.b = best_match_location[1];
+			motion_vectors->push_back(v);
+			for (int y = 0; y < block_size; y++) {
+				for (int x = 0; x < block_size; x++) {
+
+					int src_x = mx + best_match_location[0] + x;
+					int src_y = my + best_match_location[1] + y;
+					int dst_x = mx + x;
+					int dst_y = my + y;
+					delta->Y->data[dst_x*d_width + dst_y] = delta->Y->data[dst_x*d_width + dst_y] - source->Y->data[src_x*d_width + src_y];
+					delta->Cb->data[dst_x*d_width + dst_y] = delta->Cb->data[dst_x*d_width + dst_y] - source->Cb->data[src_x*d_width + src_y];
+					delta->Cr->data[dst_x*d_width + dst_y] = delta->Cr->data[dst_x*d_width + dst_y] - source->Cr->data[src_x*d_width + src_y];
+				}
+			}
+
+		}
+	}
+
+
+}
+
 
 
 
@@ -676,14 +961,14 @@ int encode() {
 				for (int i = 0; i < end_frame; i++) {
 					Image * load_RGB = new Image(SIZE_ROW, SIZE_ROW, 0);
 					loaded_images[i] = new Frame(SIZE_ROW, SIZE_ROW, 0);
-					//printf("Loading Frame %d...\n",i);
+					printf("Loading Frame %d...\n",i);
 					loadImage(i, image_path, &load_RGB);
 					openCL_convert_lowPass(load_RGB, loaded_images[i], kernel, device_ptrs,&loaded_events[i]);
 					loaded_images_mutex[i].unlock();
-					//printf("Frame %d ready...\n", i);
+					printf("Frame %d ready...\n", i);
 				}
 				for (int i = 0; i < end_frame; i++) {
-					//print("WriteImage..."); 
+					print("WriteImage..."); 
 					encoded_images_mutex[i].lock();
 					write_stream(stream_path, encoded_images[i]);
 					encoded_images_mutex[i].unlock();
@@ -691,10 +976,12 @@ int encode() {
 				}
 			}
 		else {
+			Frame * frame_lowpassed;
 			Frame * frame_lowpassed_a_final;
 			Frame* frame_quant = new Frame(width, height, DOWNSAMPLE);
 			Frame* frame_zigzag = new Frame(MPEG_CONSTANT, width*height / MPEG_CONSTANT, ZIGZAG);
 			FrameEncode* frame_encode = new FrameEncode(width, height, MPEG_CONSTANT);
+			std::vector<mVector> * mvecs[4];
 			#pragma omp parallel num_threads(4)
 			{
 				int tid = omp_get_thread_num();
@@ -704,98 +991,58 @@ int encode() {
 					gettimeofday(&starttime, NULL);
 
 					if (tid == 0) {
+						print("Waiting for image");
 						loaded_images_mutex[frame_number].lock();
 						loaded_images_mutex[frame_number].unlock();
 						clWaitForEvents(1, &loaded_events[frame_number]);
-						frame_lowpassed_a_final = loaded_images[frame_number];
-						//dump_frame(frame_lowpassed_a_final, "frame_ycbcr_lowpass", frame_number);
-
-
-						#ifdef motionVEC
-						Frame *frame_lowpassed_final = NULL;
+						frame_lowpassed = loaded_images[frame_number];
 
 						if (frame_number % i_frame_frequency != 0) {
-							// We have a P frame 
-							// Note that in the first iteration we don't enter this branch!
-
-							//Compute the motion vectors
-							print("Motion Vector Search...");
-
-							gettimeofday(&starttime, NULL);
-							motion_vectors = motionVectorSearch(previous_frame_lowpassed, frame_lowpassed, frame_lowpassed->width, frame_lowpassed->height);
-							gettimeofday(&endtime, NULL);
-							runtime[2] = double(endtime.tv_sec)*1000.0f + double(endtime.tv_usec) / 1000.0f - double(starttime.tv_sec)*1000.0f - double(starttime.tv_usec) / 1000.0f; //in ms 
-
-							print("Compute Delta...");
-							gettimeofday(&starttime, NULL);
-							frame_lowpassed_final = computeDelta(previous_frame_lowpassed, frame_lowpassed, motion_vectors);
-							gettimeofday(&endtime, NULL);
-							runtime[3] = double(endtime.tv_sec)*1000.0f + double(endtime.tv_usec) / 1000.0f - double(starttime.tv_sec)*1000.0f - double(starttime.tv_usec) / 1000.0f; //in ms 
-
+							print("Motion vector: ...");
+							frame_lowpassed_a_final = new Frame(frame_lowpassed);
 						}
 						else {
-							// We have a I frame 
+							// We have a I frame
+							frame_lowpassed_a_final = new Frame(frame_lowpassed);
 							motion_vectors = NULL;
-							frame_lowpassed_final = new Frame(frame_lowpassed);
+						}
+					}
+					#pragma omp barrier
+					if (frame_number % i_frame_frequency != 0) {
+						mvecs[tid] = new std::vector<mVector>();
+						motionVectorSearch(previous_frame_lowpassed, frame_lowpassed, frame_lowpassed_a_final, frame_lowpassed->width, frame_lowpassed->height, mvecs[tid]);
+
+					}
+					#pragma omp barrier
+					if (tid == 0) {
+						if (frame_number % i_frame_frequency != 0) {
+							print("Collecting motion vectors: ...");
+							motion_vectors = new std::vector<mVector>();
+							for (int i = 0; i < mvecs[0]->size(); i++) {
+								motion_vectors->push_back(mvecs[0]->at(i));
+								motion_vectors->push_back(mvecs[1]->at(i));
+								motion_vectors->push_back(mvecs[2]->at(i));
+								motion_vectors->push_back(mvecs[3]->at(i));
+							}
+							for (int i = 0; i < 4; i++) {
+								free(mvecs[i]);
+							}
 						}
 						delete frame_lowpassed; frame_lowpassed = NULL;
-
 						if (frame_number > 0) delete previous_frame_lowpassed;
-						previous_frame_lowpassed = new Frame(frame_lowpassed_final);
-
-
-
-
-
-						/* Blocking for downsample etc*/
-
-
-
-						print("Started blocked conversion");
-						frame_lowpassed_a_final = frame_lowpassed_final;
-						#endif
+						previous_frame_lowpassed = new Frame(frame_lowpassed_a_final);
+						print("blocked filtering: ...");
 					}
 					
-					#pragma omp barrier	
 
 					
-					gettimeofday(&starttime, NULL);
 					blocked_ds_dct_round(frame_lowpassed_a_final->Cr, frame_quant->Cr);
-					gettimeofday(&endtime, NULL);
-					runtime[4] = double(endtime.tv_sec)*1000.0f + double(endtime.tv_usec) / 1000.0f - double(starttime.tv_sec)*1000.0f - double(starttime.tv_usec) / 1000.0f; //in ms 
 
-					gettimeofday(&starttime, NULL);
 					blocked_ds_dct_round(frame_lowpassed_a_final->Cb, frame_quant->Cb);
-					gettimeofday(&endtime, NULL);
-					runtime[5] = double(endtime.tv_sec)*1000.0f + double(endtime.tv_usec) / 1000.0f - double(starttime.tv_sec)*1000.0f - double(starttime.tv_usec) / 1000.0f; //in ms 
 
-					gettimeofday(&starttime, NULL);
 					blocked_dct_round(frame_lowpassed_a_final->Y, frame_quant->Y);
-					gettimeofday(&endtime, NULL);
-					runtime[6] = double(endtime.tv_sec)*1000.0f + double(endtime.tv_usec) / 1000.0f - double(starttime.tv_sec)*1000.0f - double(starttime.tv_usec) / 1000.0f; //in ms 
 
 					#pragma omp barrier	
-					Frame* frame_dc_diff;
-					if (tid == 0) {
-						dump_frame(frame_quant, "frame_quant", frame_number);
-
-
-						gettimeofday(&starttime, NULL);
-						frame_dc_diff = new Frame(1, (width / 8)*(height / 8), DCDIFF); //dealocate later
-
-						dcDiff(frame_quant->Y, frame_dc_diff->Y);
-						dcDiff(frame_quant->Cb, frame_dc_diff->Cb);
-						dcDiff(frame_quant->Cr, frame_dc_diff->Cr);
-
-						//delete frame_lowpassed_a_final;
-						gettimeofday(&endtime, NULL);
-						runtime[7] = double(endtime.tv_sec)*1000.0f + double(endtime.tv_usec) / 1000.0f - double(starttime.tv_sec)*1000.0f - double(starttime.tv_usec) / 1000.0f; //in ms      
-
-						//dump_dc_diff(frame_dc_diff, "frame_dc_diff", frame_number);
-						// Zig-zag order for zero-counting
-					}
-
-						
 
 					zigZagOrder(frame_quant->Y, frame_zigzag->Y);
 					zigZagOrder(frame_quant->Cb, frame_zigzag->Cb);
@@ -809,7 +1056,13 @@ int encode() {
 					if(tid==0){
 						dump_zigzag(frame_zigzag, "frame_zigzag", frame_number);
 
-						
+
+
+						Frame* frame_dc_diff = new Frame(1, (width / 8)*(height / 8), DCDIFF); //dealocate later
+
+						dcDiff(frame_quant->Y, frame_dc_diff->Y);
+						dcDiff(frame_quant->Cb, frame_dc_diff->Cb);
+						dcDiff(frame_quant->Cr, frame_dc_diff->Cr);
 
 						stream_frame(encoded_images[frame_number], frame_number, motion_vectors, frame_number - 1, frame_dc_diff, frame_encode);
 						encoded_images_mutex[frame_number].unlock();
