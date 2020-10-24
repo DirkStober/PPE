@@ -327,7 +327,7 @@ void dump_motion_vectors(int* motion, int frame_number) {
 
 */
 
-std::string function_name[10] = {"Load Image:", "Convert & Low pass filter:", "Motion Vector Search:", "Compute Delta:", "Blocked Cr", "Blocked Cb", "Blocked Y", "Compute DC differences:", "Zig-zag order:", "Encode coefficients:"};
+std::string function_name[10] = {"Waiting for Image", "Motion Vector Search:",  "Blocked:","Compute Delta:", "ZigZag & Encode:", "Write Stream:", "Writing File:", "Setup:", "Zig-zag order:", "Encode coefficients:"};
 double runtime_accum[10] = {0};
 
 void createStatsFile(void){
@@ -340,11 +340,13 @@ void writestats(int framenum, int is_pframe, double* runtime){
 	file.open("..\\..\\outputs\\execution_stats.txt", ios::app);
 	string ftype = is_pframe?"P":"I";
 	file << "********* " << "Frame: " << std::to_string(framenum) << " (" << ftype << ")" << " *********" << std::endl;
-	for(int i=0; i<10; i++){
-		if( !( (i==2 || i==3) && !is_pframe) ){
+	for(int i=0; i<6; i++){
 			runtime_accum[i] += runtime[i]; 
 			file << setw(30) << left << function_name[i] << std::setprecision(0) << runtime[i] << "ms" << std::endl;
-		}
+	}
+	for (int i = 6; i < 8; i++) {
+		runtime_accum[i] = runtime[i];
+		file << setw(30) << left << function_name[i] << std::setprecision(0) << runtime[i] << "ms" << std::endl;
 	}
 	file << std::endl;
 	file.close();

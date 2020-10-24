@@ -2,7 +2,9 @@
 #define test_setup_h
 
 // Comment this line for profiling settings
-#define USE_MATLAB false
+//#define USE_MATLAB false
+
+#define def_num_threads 4
 
 //
 // Use these settings for comparing with MATLAB output
@@ -11,8 +13,7 @@
 
 #define SIZE_FRAME 128*128
 #define SIZE_ROW 128
-
-#define N_FRAMES 5
+#define N_FRAMES 10
 #define I_FRAME_FREQ 2
 #define DUMP_TO_DEBUG true
 #define image_name "blooper"
@@ -26,7 +27,7 @@
 #define SIZE_FRAME 2048*2048
 #define SIZE_ROW 2048
 #define N_FRAMES 10
-#define I_FRAME_FREQ 1
+#define I_FRAME_FREQ 2
 #define DUMP_TO_DEBUG false
 #define image_name "solar"
 #endif
