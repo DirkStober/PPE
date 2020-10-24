@@ -807,7 +807,7 @@ Frame* motionVectorSearch(Frame* source, Frame* match, int width, int height, st
 
 					for (int g_x = 0,
 						sx = mx - window_size;
-						g_x < 8;
+						g_x < 16;
 						++g_x, ++sx)
 					{
 						uint32_t temp_sum = 0;
@@ -816,9 +816,7 @@ Frame* motionVectorSearch(Frame* source, Frame* match, int width, int height, st
 							int
 								y = curr_sum_idx * 1 + other_loop * 8,
 								x1 = 0 + g_x,
-								x2 = 8 + g_x,
-								x3 = 16 + g_x,
-								x4 = 24 + g_x;
+								x2 = 8 + g_x;
 							temp_sum += zeros[y][x1] + zeros[y][x2];
 						}
 
